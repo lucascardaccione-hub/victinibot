@@ -53,6 +53,15 @@ def find_target_channel(guild: discord.Guild, target_name: str) -> Optional[disc
     return None
 
 
+def is_snap_level_channel(channel: Optional[discord.abc.GuildChannel]) -> bool:
+    """Verifica que el canal donde se ejecutó el comando sea exclusivamente 🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀."""
+    if channel is None or not hasattr(channel, "name"):
+        return False
+    if channel.name == LEVEL_CHANNEL_NAME:
+        return True
+    return normalize_channel_name(channel.name) == normalize_channel_name(LEVEL_CHANNEL_NAME)
+
+
 def build_ranking_embed(
     guild: discord.Guild,
     page: int,
@@ -233,11 +242,11 @@ async def on_message(message: discord.Message):
 
 
 # ==========================================
-# 3. COMANDO /nivel
+# 3. COMANDO /nivel (EXCLUSIVO DE 🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀)
 # ==========================================
 @bot.tree.command(
     name="nivel",
-    description="Consultá tu nivel actual y tu posición en el ranking de SNAP!",
+    description="Consultá tu nivel actual y tu posición en el ranking de SNAP! (Solo en 🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀)",
 )
 @app_commands.describe(usuario="(Opcional) Miembro del que querés consultar el nivel")
 async def nivel_command(
@@ -247,6 +256,15 @@ async def nivel_command(
     if interaction.guild is None:
         await interaction.response.send_message(
             "Este comando solo funciona dentro del servidor **SNAP!** 🔥",
+            ephemeral=True,
+        )
+        return
+
+    if not is_snap_level_channel(interaction.channel):
+        level_ch = find_target_channel(interaction.guild, LEVEL_CHANNEL_NAME)
+        ch_mention = level_ch.mention if level_ch else f"**{LEVEL_CHANNEL_NAME}**"
+        await interaction.response.send_message(
+            f"🔥 ¡Ojo! El comando `/nivel` solo se puede usar en el canal {ch_mention} 👀",
             ephemeral=True,
         )
         return
@@ -273,16 +291,25 @@ async def nivel_command(
 
 
 # ==========================================
-# 4. COMANDO /ranking
+# 4. COMANDO /ranking (EXCLUSIVO DE 🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀)
 # ==========================================
 @bot.tree.command(
     name="ranking",
-    description="Muestra la tabla de posiciones con el Top 10 de niveles y experiencia de SNAP!",
+    description="Muestra la tabla de posiciones con el Top 10 de niveles y experiencia (Solo en 🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀)",
 )
 async def ranking_command(interaction: discord.Interaction):
     if interaction.guild is None:
         await interaction.response.send_message(
             "Este comando solo funciona dentro del servidor **SNAP!** 🔥",
+            ephemeral=True,
+        )
+        return
+
+    if not is_snap_level_channel(interaction.channel):
+        level_ch = find_target_channel(interaction.guild, LEVEL_CHANNEL_NAME)
+        ch_mention = level_ch.mention if level_ch else f"**{LEVEL_CHANNEL_NAME}**"
+        await interaction.response.send_message(
+            f"🔥 ¡Ojo! El comando `/ranking` solo se puede usar en el canal {ch_mention} 👀",
             ephemeral=True,
         )
         return
