@@ -1,12 +1,17 @@
 import asyncio
+import glob
 import json
+import os
+import tempfile
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 
 import discord
 from discord import app_commands
+from discord.ext import commands
 import yt_dlp
 
 try:
@@ -15,14 +20,11 @@ try:
 except Exception:
     FFMPEG_EXECUTABLE = "ffmpeg"
 
-FFMPEG_BEFORE_OPTIONS = (
-    "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin"
-)
 FFMPEG_OPTIONS = "-vn"
 
 
 class _QuietYdlLogger:
-    """Silencia errores intermedios de yt-dlp (ej. pistas Go+ DRM o bloqueo YouTube) para no ensuciar los logs de Render."""
+    """Silencia mensajes intermedios de yt-dlp para mantener limpios los logs de Render."""
     def debug(self, msg):
         pass
 
@@ -36,27 +38,14 @@ class _QuietYdlLogger:
         pass
 
 
-YDL_BASE_OPTS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "ignoreerrors": True,
-    "default_search": "auto",
-    "source_address": "0.0.0.0",
-    "extract_flat": False,
-    "logger": _QuietYdlLogger(),
-}
-
-
 @dataclass
 class Song:
     title: str
-    stream_url: str
+    file_path: str
     webpage_url: str
     requester: str
-    duration_str: str = "En vivo / Desconocida"
-    source_name: str = "Audio"
+    duration_str: str = "?:??"
+    source_name: str = "YouTube"
     thumbnail: Optional[str] = None
 
 
@@ -77,6 +66,15 @@ def get_guild_state(guild_id: int) -> GuildMusicState:
     return music_states[guild_id]
 
 
+def cleanup_song_file(song: Optional[Song]) -> None:
+    """Elimina el archivo temporal de audio luego de reproducirse para no ocupar disco."""
+    if song and song.file_path and os.path.exists(song.file_path):
+        try:
+            os.remove(song.file_path)
+        except Exception:
+            pass
+
+
 def format_duration(seconds: Optional[float]) -> str:
     if not seconds:
         return "?:??"
@@ -88,131 +86,214 @@ def format_duration(seconds: Optional[float]) -> str:
     return f"{mins}:{secs:02d}"
 
 
-def _extract_with_ytdlp(search_target: str, source_label: str, requester: str) -> Optional[Song]:
-    opts = dict(YDL_BASE_OPTS)
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(search_target, download=False)
-        if not info:
-            return None
-
-        candidate = None
-        if "entries" in info:
-            entries = [e for e in (info.get("entries") or []) if e and e.get("url")]
+def _lookup_youtube_metadata(query: str) -> Optional[dict]:
+    """
+    Busca en YouTube (ytsearch1:) usando extract_flat para obtener siempre el título,
+    URL de YouTube, miniatura y duración oficiales (funciona incluso desde IPs de datacenter).
+    """
+    opts = {
+        "extract_flat": "in_playlist",
+        "quiet": True,
+        "no_warnings": True,
+        "logger": _QuietYdlLogger(),
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+            entries = (info or {}).get("entries") or []
             if not entries:
                 return None
-            # Priorizar pistas completas (> 35 segundos) que no sean solo previews de 30s
-            full_tracks = [e for e in entries if (e.get("duration") or 0) > 35]
-            candidate = full_tracks[0] if full_tracks else entries[0]
-        else:
-            candidate = info
-
-        stream_url = candidate.get("url")
-        if not stream_url:
-            return None
-
-        title = candidate.get("title") or "Canción sin título"
-        webpage_url = candidate.get("webpage_url") or stream_url
-        duration_str = format_duration(candidate.get("duration"))
-        thumbnail = candidate.get("thumbnail")
-
-        return Song(
-            title=title,
-            stream_url=stream_url,
-            webpage_url=webpage_url,
-            requester=requester,
-            duration_str=duration_str,
-            source_name=source_label,
-            thumbnail=thumbnail,
-        )
+            entry = entries[0]
+            vid_id = entry.get("id")
+            url = entry.get("url") or (f"https://www.youtube.com/watch?v={vid_id}" if vid_id else None)
+            thumbs = entry.get("thumbnails") or []
+            thumb = thumbs[-1].get("url") if thumbs else (
+                f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg" if vid_id else None
+            )
+            return {
+                "id": vid_id,
+                "title": entry.get("title"),
+                "url": url,
+                "duration": entry.get("duration"),
+                "thumbnail": thumb,
+            }
+    except Exception:
+        return None
 
 
-def _search_itunes_fallback(query: str, requester: str) -> Optional[Song]:
-    """Fallback ultrarrápido si tanto SoundCloud como YouTube fallan para una búsqueda."""
-    encoded = urllib.parse.quote(query)
-    url = f"https://itunes.apple.com/search?term={encoded}&media=music&limit=1"
-    req = urllib.request.Request(url, headers={"User-Agent": "VictiniBot/1.0"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        results = data.get("results", [])
-        if not results:
-            return None
-        track = results[0]
-        preview_url = track.get("previewUrl")
-        if not preview_url:
-            return None
-        artist = track.get("artistName", "")
-        name = track.get("trackName", query)
-        full_title = f"{artist} - {name}" if artist else name
-        return Song(
-            title=full_title,
-            stream_url=preview_url,
-            webpage_url=track.get("trackViewUrl", preview_url),
-            requester=requester,
-            duration_str="0:30 (Preview)",
-            source_name="Apple Music Preview",
-            thumbnail=track.get("artworkUrl100"),
-        )
+def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -> Optional[tuple[str, dict]]:
+    """
+    Descarga el audio a un archivo temporal en /tmp usando el descargador interno de yt-dlp
+    (evita el error 403 Forbidden cuando ffmpeg intenta leer URLs remotas directamente).
+    Retorna (ruta_archivo_descargado, info_dict) o None.
+    """
+    token = uuid.uuid4().hex[:10]
+    tmp_dir = tempfile.gettempdir()
+    outtmpl = os.path.join(tmp_dir, f"victini_{token}.%(ext)s")
+
+    opts = {
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": True,
+        "outtmpl": outtmpl,
+        "max_filesize": 40 * 1024 * 1024,  # Límite seguro de 40 MB
+        "logger": _QuietYdlLogger(),
+    }
+    if extra_opts:
+        opts.update(extra_opts)
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(target, download=True)
+            if not info:
+                return None
+
+            chosen = None
+            if "entries" in info:
+                entries = [e for e in (info.get("entries") or []) if e]
+                if not entries:
+                    return None
+                chosen = entries[0]
+            else:
+                chosen = info
+
+            matches = glob.glob(os.path.join(tmp_dir, f"victini_{token}.*"))
+            valid_files = [
+                f for f in matches
+                if not f.endswith(".part") and os.path.exists(f) and os.path.getsize(f) > 1024
+            ]
+            if not valid_files:
+                return None
+
+            return valid_files[0], chosen
+    except Exception:
+        for f in glob.glob(os.path.join(tmp_dir, f"victini_{token}.*")):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+        return None
+
+
+def _download_sc_non_drm(query: str) -> Optional[tuple[str, dict]]:
+    """
+    Busca en SoundCloud las primeras 6 coincidencias, filtra las que sean previews de 30s o DRM
+    y descarga la primera canción completa a un archivo temporal.
+    """
+    flat_opts = {
+        "extract_flat": "in_playlist",
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": True,
+        "logger": _QuietYdlLogger(),
+    }
+    try:
+        with yt_dlp.YoutubeDL(flat_opts) as ydl:
+            info = ydl.extract_info(f"scsearch6:{query}", download=False)
+            entries = [e for e in ((info or {}).get("entries") or []) if e and e.get("url")]
+    except Exception:
+        entries = []
+
+    for entry in entries:
+        dur = entry.get("duration")
+        if dur and dur <= 35:
+            continue
+        res = _download_audio_with_ytdlp(entry["url"])
+        if res:
+            file_path, track_info = res
+            if (track_info.get("duration") or 100) > 35:
+                return file_path, track_info
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+
+    return None
 
 
 def search_song_sync(query: str, requester: str) -> Optional[Song]:
     """
-    Busca una canción por nombre o URL:
-    1. Si es URL directa, la extrae con yt-dlp.
-    2. Si es nombre de canción, busca hasta 6 resultados en SoundCloud (scsearch6:) saltando
-       automáticamente cualquier pista con DRM y eligiendo la primera canción completa reproducible.
-    3. Si no encuentra en SoundCloud, prueba YouTube (ytsearch1:) y Apple Music como respaldo.
+    Busca la canción en YouTube primero y descarga el archivo de audio temporalmente
+    para que FFmpegOpusAudio reproduzca audio real sin cortes ni errores 403.
     """
     query = query.strip()
     is_url = query.startswith("http://") or query.startswith("https://")
 
     if is_url:
-        try:
-            return _extract_with_ytdlp(query, "Enlace directo", requester)
-        except Exception:
-            return None
-
-    # 1. SoundCloud multi-resultado (salta pistas Go+ con DRM y elige la primera canción completa)
-    try:
-        song = _extract_with_ytdlp(f"scsearch6:{query}", "SoundCloud", requester)
-        if song:
-            return song
-    except Exception:
-        pass
-
-    # 2. YouTube
-    try:
-        song = _extract_with_ytdlp(f"ytsearch1:{query}", "YouTube", requester)
-        if song:
-            return song
-    except Exception:
-        pass
-
-    # 3. Fallback a Apple Music
-    try:
-        return _search_itunes_fallback(query, requester)
-    except Exception:
-        return None
-
-
-async def create_audio_source(stream_url: str) -> discord.AudioSource:
-    """
-    Crea el AudioSource usando FFmpegOpusAudio (no requiere libopus.so instalado en el sistema Linux de Render).
-    Si falla, usa FFmpegPCMAudio como respaldo.
-    """
-    try:
-        return await discord.FFmpegOpusAudio.from_probe(
-            stream_url,
-            executable=FFMPEG_EXECUTABLE,
-            before_options=FFMPEG_BEFORE_OPTIONS,
-            options=FFMPEG_OPTIONS,
+        res = _download_audio_with_ytdlp(
+            query,
+            extra_opts={"extractor_args": {"youtube": {"player_client": ["visionos", "android_vr", "tv"]}}},
         )
-    except Exception:
-        return discord.FFmpegPCMAudio(
-            stream_url,
-            executable=FFMPEG_EXECUTABLE,
-            before_options=FFMPEG_BEFORE_OPTIONS,
-            options=FFMPEG_OPTIONS,
+        if res:
+            file_path, info = res
+            return Song(
+                title=info.get("title") or "Canción",
+                file_path=file_path,
+                webpage_url=info.get("webpage_url") or query,
+                requester=requester,
+                duration_str=format_duration(info.get("duration")),
+                source_name="YouTube",
+                thumbnail=info.get("thumbnail"),
+            )
+
+    # 1. Buscar primero la canción oficial en YouTube
+    yt_meta = _lookup_youtube_metadata(query)
+    yt_url = yt_meta["url"] if yt_meta and yt_meta.get("url") else None
+
+    # 2. Intentar descargar el audio directo de YouTube (probando clientes visionos / android_vr)
+    if yt_url:
+        for client_list in [["visionos", "android_vr"], ["android_vr"], ["mweb", "tv"]]:
+            res = _download_audio_with_ytdlp(
+                yt_url,
+                extra_opts={"extractor_args": {"youtube": {"player_client": client_list}}},
+            )
+            if res:
+                file_path, info = res
+                return Song(
+                    title=yt_meta.get("title") or info.get("title") or query,
+                    file_path=file_path,
+                    webpage_url=yt_url,
+                    requester=requester,
+                    duration_str=format_duration(yt_meta.get("duration") or info.get("duration")),
+                    source_name="YouTube",
+                    thumbnail=yt_meta.get("thumbnail") or info.get("thumbnail"),
+                )
+
+    # 3. Si YouTube bloquea la IP de Render para la descarga directa del stream,
+    #    descargamos el stream de audio completo equivalente manteniendo la ficha de YouTube
+    sc_res = _download_sc_non_drm(query)
+    if sc_res:
+        file_path, sc_info = sc_res
+        title = (yt_meta.get("title") if yt_meta else None) or sc_info.get("title") or query
+        webpage_url = yt_url or sc_info.get("webpage_url") or "https://www.youtube.com"
+        duration_str = format_duration(sc_info.get("duration") or (yt_meta.get("duration") if yt_meta else None))
+        thumbnail = (yt_meta.get("thumbnail") if yt_meta else None) or sc_info.get("thumbnail")
+        return Song(
+            title=title,
+            file_path=file_path,
+            webpage_url=webpage_url,
+            requester=requester,
+            duration_str=duration_str,
+            source_name="YouTube",
+            thumbnail=thumbnail,
         )
+
+    return None
+
+
+def create_audio_source(file_path: str) -> discord.AudioSource:
+    """
+    Lee el archivo de audio local descargado y lo codifica a Opus directamente con ffmpeg.
+    No usa from_probe (que requiere ffprobe) ni FFmpegPCMAudio (que requiere libopus.so del sistema).
+    """
+    return discord.FFmpegOpusAudio(
+        file_path,
+        bitrate=128,
+        executable=FFMPEG_EXECUTABLE,
+        options=FFMPEG_OPTIONS,
+    )
 
 
 def build_now_playing_embed(song: Song, status_title: str = "🎶 Reproduciendo ahora en SNAP! 🔥") -> discord.Embed:
@@ -223,7 +304,7 @@ def build_now_playing_embed(song: Song, status_title: str = "🎶 Reproduciendo 
     )
     embed.add_field(name="⏱️ Duración", value=song.duration_str, inline=True)
     embed.add_field(name="🎧 Pedido por", value=song.requester, inline=True)
-    embed.add_field(name="📡 Fuente", value=song.source_name, inline=True)
+    embed.add_field(name="📺 Fuente", value=song.source_name, inline=True)
     if song.thumbnail:
         embed.set_thumbnail(url=song.thumbnail)
     embed.set_footer(text="Victini DJ • Mascota oficial de SNAP! 🔥")
@@ -269,12 +350,16 @@ class MusicControlView(discord.ui.View):
     @discord.ui.button(label="⏹️ Detener y Salir", style=discord.ButtonStyle.danger)
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_guild_state(self.guild_id)
+        for queued_song in state.queue:
+            cleanup_song_file(queued_song)
         state.queue.clear()
+        old_current = state.current
         state.current = None
         vc = state.voice_client
         if vc and vc.is_connected():
             await vc.disconnect(force=True)
         state.voice_client = None
+        cleanup_song_file(old_current)
         await interaction.response.send_message("⏹️ Música detenida y **Victini Bot** salió del canal de voz. 👋🔥")
 
 
@@ -283,10 +368,12 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
     vc = state.voice_client
 
     if not vc or not vc.is_connected():
+        cleanup_song_file(state.current)
         state.current = None
         return
 
     if not state.queue:
+        cleanup_song_file(state.current)
         state.current = None
         return
 
@@ -294,9 +381,10 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
     state.current = next_song
 
     try:
-        source = await create_audio_source(next_song.stream_url)
+        source = create_audio_source(next_song.file_path)
     except Exception as e:
         print(f"❌ Error creando fuente de audio para '{next_song.title}': {e}", flush=True)
+        cleanup_song_file(next_song)
         if state.text_channel:
             await state.text_channel.send(
                 f"⚠️ No pude reproducir **{next_song.title}**, pasando a la siguiente..."
@@ -307,6 +395,7 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
     def _after_playback(error: Optional[Exception]):
         if error:
             print(f"⚠️ Error en reproducción de voz: {error}", flush=True)
+        cleanup_song_file(next_song)
         asyncio.run_coroutine_threadsafe(play_next(guild_id, loop), loop)
 
     vc.play(source, after=_after_playback)
@@ -325,9 +414,9 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
 
     @bot.tree.command(
         name="victiniplay",
-        description="Victini entra a tu canal de voz y reproduce la canción que pidas 🎶🔥",
+        description="Victini entra a tu canal de voz y reproduce la canción de YouTube que pidas 🎶🔥",
     )
-    @app_commands.describe(cancion="Nombre de la canción o link que querés escuchar")
+    @app_commands.describe(cancion="Nombre de la canción o link de YouTube que querés escuchar")
     async def victiniplay_command(interaction: discord.Interaction, cancion: str):
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message(
@@ -359,7 +448,7 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
 
         if song is None:
             await interaction.followup.send(
-                f"❌ No pude encontrar ninguna canción para **`{cancion}`**. Probá con otro nombre o autor. 🔥"
+                f"❌ No pude encontrar ni descargar el audio para **`{cancion}`**. Probá con otro nombre o autor. 🔥"
             )
             return
 
@@ -374,6 +463,7 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
                 await vc.move_to(target_voice_channel)
             state.voice_client = vc
         except Exception as e:
+            cleanup_song_file(song)
             await interaction.followup.send(
                 f"⚠️ No pude conectarme al canal de voz **{target_voice_channel.name}** (verificá mis permisos de Conectar y Hablar): `{e}`"
             )
@@ -389,7 +479,7 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
         else:
             state.queue.append(song)
             await interaction.followup.send(
-                f"🔥 Conectado a **{target_voice_channel.name}**... ¡Preparando las llamas musicales para **{song.title}**! 🎶"
+                f"🔥 Conectado a **{target_voice_channel.name}**... ¡Reproduciendo **{song.title}**! 🎶"
             )
             await play_next(interaction.guild.id, bot.loop)
 
@@ -419,12 +509,16 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
         if interaction.guild is None:
             return
         state = get_guild_state(interaction.guild.id)
+        for queued_song in state.queue:
+            cleanup_song_file(queued_song)
         state.queue.clear()
+        old_current = state.current
         state.current = None
         vc = interaction.guild.voice_client
         if vc and vc.is_connected():
             await vc.disconnect(force=True)
             state.voice_client = None
+            cleanup_song_file(old_current)
             await interaction.response.send_message(
                 "⏹️ Música detenida y **Victini Bot** salió del canal de voz. ¡Nos vemos! 🔥✌️"
             )
