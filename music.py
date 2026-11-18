@@ -283,12 +283,27 @@ def search_song_sync(query: str, requester: str) -> Optional[Song]:
     return None
 
 
+class CleanFFmpegOpusAudio(discord.FFmpegOpusAudio):
+    """
+    Salta las páginas de cabecera Ogg (OpusHead y OpusTags) para que solo se envíen
+    tramas de audio Opus RFC 6716 puras al encriptador DAVE (davey) y a Discord RTP.
+    """
+    def read(self) -> bytes:
+        while True:
+            data = super().read()
+            if not data:
+                return b""
+            if data.startswith((b"OpusHead", b"OpusTags")):
+                continue
+            return data
+
+
 def create_audio_source(file_path: str) -> discord.AudioSource:
     """
     Lee el archivo de audio local descargado y lo codifica a Opus directamente con ffmpeg.
     No usa from_probe (que requiere ffprobe) ni FFmpegPCMAudio (que requiere libopus.so del sistema).
     """
-    return discord.FFmpegOpusAudio(
+    return CleanFFmpegOpusAudio(
         file_path,
         bitrate=128,
         executable=FFMPEG_EXECUTABLE,
