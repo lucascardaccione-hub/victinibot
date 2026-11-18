@@ -298,14 +298,14 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
 
 
 def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
-    """Registra los comandos slash de música (/play, /skip, /stop, /cola) en el árbol del bot."""
+    """Registra los comandos slash de música (/victiniplay, /victiniskip, /victinistop, /victinicola) en el árbol del bot."""
 
     @bot.tree.command(
-        name="play",
+        name="victiniplay",
         description="Victini entra a tu canal de voz y reproduce la canción que pidas 🎶🔥",
     )
     @app_commands.describe(cancion="Nombre de la canción o link que querés escuchar")
-    async def play_command(interaction: discord.Interaction, cancion: str):
+    async def victiniplay_command(interaction: discord.Interaction, cancion: str):
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message(
                 "Este comando solo funciona dentro del servidor **SNAP!** 🔥",
@@ -324,7 +324,7 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
 
         if target_voice_channel is None:
             await interaction.response.send_message(
-                "🎧 ¡Primero tenés que conectarte a un canal de voz (o escribir `/play` desde el chat de un canal de voz) para que entre a poner música! 🔥",
+                "🎧 ¡Primero tenés que conectarte a un canal de voz (o escribir `/victiniplay` desde el chat de un canal de voz) para que entre a poner música! 🔥",
                 ephemeral=True,
             )
             return
@@ -377,10 +377,10 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
             await play_next(interaction.guild.id, bot.loop)
 
     @bot.tree.command(
-        name="skip",
-        description="Salta a la siguiente canción de la cola de reproducción ⏭️",
+        name="victiniskip",
+        description="Salta a la siguiente canción de la cola de Victini DJ ⏭️",
     )
-    async def skip_command(interaction: discord.Interaction):
+    async def victiniskip_command(interaction: discord.Interaction):
         if interaction.guild is None:
             return
         vc = interaction.guild.voice_client
@@ -395,10 +395,10 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
         await interaction.response.send_message("⏭️ ¡Canción saltada! Pasando a la siguiente... 🔥")
 
     @bot.tree.command(
-        name="stop",
+        name="victinistop",
         description="Detiene la música, vacía la cola y desconecta a Victini del canal de voz ⏹️",
     )
-    async def stop_command(interaction: discord.Interaction):
+    async def victinistop_command(interaction: discord.Interaction):
         if interaction.guild is None:
             return
         state = get_guild_state(interaction.guild.id)
@@ -418,16 +418,16 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
             )
 
     @bot.tree.command(
-        name="cola",
-        description="Muestra la canción actual y la lista de canciones en espera 🎶",
+        name="victinicola",
+        description="Muestra la canción actual y la lista de canciones en espera de Victini DJ 🎶",
     )
-    async def queue_command(interaction: discord.Interaction):
+    async def victinicola_command(interaction: discord.Interaction):
         if interaction.guild is None:
             return
         state = get_guild_state(interaction.guild.id)
 
         embed = discord.Embed(
-            title="🎶 Cola de Música de SNAP! 🔥",
+            title="🎶 Cola de Música de SNAP! (Victini DJ) 🔥",
             color=discord.Color.orange(),
         )
 
@@ -458,7 +458,7 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
         else:
             embed.add_field(
                 name="📋 En espera",
-                value="La cola está vacía. Usá `/play` para agregar temas.",
+                value="La cola está vacía. Usá `/victiniplay` para agregar temas.",
                 inline=False,
             )
 

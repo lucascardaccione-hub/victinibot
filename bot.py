@@ -173,7 +173,7 @@ class VictiniBot(commands.Bot):
         init_db()
         setup_music_commands(self)
         await self.tree.sync()
-        print("🔥 Comandos slash (/nivel, /ranking, /play, /skip, /stop, /cola) sincronizados correctamente.")
+        print("🔥 Comandos slash (/nivel, /ranking, /victiniplay, /victiniskip, /victinistop, /victinicola) sincronizados correctamente.")
 
     async def on_ready(self):
         print(f"✅ Victini Bot conectado como {self.user} (ID: {self.user.id})")
