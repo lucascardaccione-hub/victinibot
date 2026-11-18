@@ -1,7 +1,11 @@
 import os
+import sys
 import time
+import json
 import random
 import unicodedata
+import urllib.request
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import discord
@@ -18,6 +22,9 @@ from database import (
 )
 from music import setup_music_commands
 
+# Forzar salida sin buffer en Render para que todos los print() aparezcan al instante en los Logs
+sys.stdout.reconfigure(line_buffering=True)
+
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -25,11 +32,42 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 # Nombres exactos de los canales del servidor SNAP!
 WELCOME_CHANNEL_NAME = "🫂𝑩𝑰𝑬𝑵𝑽𝑬𝑵𝑰𝑫𝑰𝑻𝑻𝑶𝑺"
 LEVEL_CHANNEL_NAME = "🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀"
+UPDATES_CHANNEL_NAME = "🔥𝑽𝑰𝑪𝑻𝑰𝑵𝑰-𝑼𝑷𝑫𝑨𝑻𝑬𝑺🔥"
+
+# Zona horaria de Argentina (UTC-3)
+ARG_TZ = timezone(timedelta(hours=-3))
 
 # Configuración de experiencia por mensaje
 XP_MIN = 15
 XP_MAX = 25
 XP_COOLDOWN_SECONDS = 45  # Tiempo mínimo entre mensajes que otorgan XP
+
+
+def get_latest_commit_time_str() -> str:
+    """
+    Obtiene la fecha y hora exacta del último commit en GitHub (lucascardaccione-hub/victinibot)
+    convertida a hora de Argentina (UTC-3). Si falla la consulta, usa la hora actual del deploy.
+    """
+    try:
+        commit_sha = os.environ.get("RENDER_GIT_COMMIT", "main")
+        url = f"https://api.github.com/repos/lucascardaccione-hub/victinibot/commits/{commit_sha}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "VictiniBot-SNAP/1.0",
+                "Accept": "application/vnd.github.v3+json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            iso_date = data["commit"]["committer"]["date"]  # Ej: "2026-11-18T22:36:00Z"
+            dt_utc = datetime.fromisoformat(iso_date.replace("Z", "+00:00"))
+            dt_arg = dt_utc.astimezone(ARG_TZ)
+            return dt_arg.strftime("%d/%m/%Y %H:%M:%S (Hora ARG)")
+    except Exception as e:
+        print(f"⚠️ No se pudo consultar fecha de commit en GitHub API: {e}", flush=True)
+        now_arg = datetime.now(ARG_TZ)
+        return now_arg.strftime("%d/%m/%Y %H:%M:%S (Hora ARG)")
 
 
 def normalize_channel_name(name: str) -> str:
@@ -168,15 +206,60 @@ class VictiniBot(commands.Bot):
         intents.voice_states = True     # Necesario para conectarse y reproducir música en canales de voz
 
         super().__init__(command_prefix="!", intents=intents)
+        self._boot_notified = False
 
     async def setup_hook(self):
         init_db()
         setup_music_commands(self)
-        await self.tree.sync()
-        print("🔥 Comandos slash (/nivel, /ranking, /victiniplay, /victiniskip, /victinistop, /victinicola) sincronizados correctamente.")
+        print("🔥 Inicializando base de datos y árbol de comandos slash...", flush=True)
 
     async def on_ready(self):
-        print(f"✅ Victini Bot conectado como {self.user} (ID: {self.user.id})")
+        print(f"✅ Victini Bot conectado como {self.user} (ID: {self.user.id})", flush=True)
+        if not self._boot_notified:
+            self._boot_notified = True
+            commit_time_str = get_latest_commit_time_str()
+
+            # 1. Sincronizar comandos al instante en cada servidor y avisar en 🔥𝑽𝑰𝑪𝑻𝑰𝑵𝑰-𝑼𝑷𝑫𝑨𝑻𝑬𝑺🔥
+            for guild in self.guilds:
+                try:
+                    self.tree.copy_global_to(guild=guild)
+                    synced = await self.tree.sync(guild=guild)
+                    print(
+                        f"⚡ {len(synced)} comandos sincronizados al instante en '{guild.name}' ({guild.id})",
+                        flush=True,
+                    )
+                except Exception as e:
+                    print(f"⚠️ Error sincronizando en {guild.name}: {e}", flush=True)
+
+                # Enviar aviso de actualización al canal "🔥𝑽𝑰𝑪𝑻𝑰𝑵𝑰-𝑼𝑷𝑫𝑨𝑻𝑬𝑺🔥"
+                updates_channel = find_target_channel(guild, UPDATES_CHANNEL_NAME)
+                if updates_channel is not None:
+                    update_msg = (
+                        "Estoy actualizado y online 🔥\n"
+                        "Al servicio de SNAP!\n\n"
+                        f"Horario último commit: {commit_time_str}"
+                    )
+                    try:
+                        await updates_channel.send(update_msg)
+                        print(f"📢 Aviso de actualización enviado a '{updates_channel.name}'.", flush=True)
+                    except Exception as e:
+                        print(f"⚠️ No se pudo enviar aviso a '{updates_channel.name}': {e}", flush=True)
+                else:
+                    print(
+                        f"⚠️ No se encontró el canal '{UPDATES_CHANNEL_NAME}' en '{guild.name}'.",
+                        flush=True,
+                    )
+
+            # 2. Sincronizar globalmente
+            try:
+                await self.tree.sync()
+                print(
+                    "🔥 Comandos globales (/nivel, /ranking, /victiniplay, /victiniskip, /victinistop, /victinicola) sincronizados.",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"⚠️ Error en sync global: {e}", flush=True)
+
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
@@ -199,7 +282,8 @@ async def on_member_join(member: discord.Member):
     welcome_channel = find_target_channel(member.guild, WELCOME_CHANNEL_NAME)
     if welcome_channel is None:
         print(
-            f"⚠️ No se encontró el canal '{WELCOME_CHANNEL_NAME}' en el servidor '{member.guild.name}'."
+            f"⚠️ No se encontró el canal '{WELCOME_CHANNEL_NAME}' en el servidor '{member.guild.name}'.",
+            flush=True,
         )
         return
 
@@ -238,7 +322,8 @@ async def on_message(message: discord.Message):
             await level_channel.send(level_up_msg)
         else:
             print(
-                f"⚠️ {message.author} subió a nivel {new_level}, pero no se encontró el canal '{LEVEL_CHANNEL_NAME}'."
+                f"⚠️ {message.author} subió a nivel {new_level}, pero no se encontró el canal '{LEVEL_CHANNEL_NAME}'.",
+                flush=True,
             )
 
     await bot.process_commands(message)
@@ -332,11 +417,12 @@ if __name__ == "__main__":
     if not TOKEN or TOKEN == "TU_TOKEN_DE_DISCORD_AQUI":
         print(
             "❌ ERROR: No se encontró DISCORD_TOKEN en las variables de entorno o en el archivo .env.\n"
-            "Configurá DISCORD_TOKEN en Render o en tu archivo .env local."
+            "Configurá DISCORD_TOKEN en Render o en tu archivo .env local.",
+            flush=True,
         )
     else:
         from keep_alive import keep_alive
 
         keep_alive()
-        print("🚀 Iniciando Portal Web + Victini Bot en Discord...")
+        print("🚀 Iniciando Portal Web + Victini Bot en Discord...", flush=True)
         bot.run(TOKEN)
