@@ -235,17 +235,17 @@ class VictiniBot(commands.Bot):
             self._boot_notified = True
             commit_time_str = get_latest_commit_time_str()
 
-            # 1. Sincronizar comandos al instante en cada servidor y avisar en 🔥𝑽𝑰𝑪𝑻𝑰𝑵𝑰-𝑼𝑷𝑫𝑨𝑻𝑬𝑺🔥
+            # 1. Limpiar comandos duplicados a nivel guild para que no aparezcan dobles en Discord
             for guild in self.guilds:
                 try:
-                    self.tree.copy_global_to(guild=guild)
-                    synced = await self.tree.sync(guild=guild)
+                    self.tree.clear_commands(guild=guild)
+                    await self.tree.sync(guild=guild)
                     print(
-                        f"⚡ {len(synced)} comandos sincronizados al instante en '{guild.name}' ({guild.id})",
+                        f"🧹 Comandos duplicados de servidor limpiados en '{guild.name}' ({guild.id})",
                         flush=True,
                     )
                 except Exception as e:
-                    print(f"⚠️ Error sincronizando en {guild.name}: {e}", flush=True)
+                    print(f"⚠️ Error limpiando comandos de guild en {guild.name}: {e}", flush=True)
 
                 # Enviar aviso de actualización al canal "🔥𝑽𝑰𝑪𝑻𝑰𝑵𝑰-𝑼𝑷𝑫𝑨𝑻𝑬𝑺🔥"
                 updates_channel = find_target_channel(guild, UPDATES_CHANNEL_NAME)
