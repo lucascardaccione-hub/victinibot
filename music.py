@@ -89,7 +89,7 @@ def format_duration(seconds: Optional[float]) -> str:
 def _lookup_youtube_metadata(query: str) -> Optional[dict]:
     """
     Busca en YouTube (ytsearch1:) usando extract_flat para obtener siempre el título,
-    URL de YouTube, miniatura y duración oficiales (funciona incluso desde IPs de datacenter).
+    canal/artista, URL de YouTube, miniatura y duración oficiales.
     """
     opts = {
         "extract_flat": "in_playlist",
@@ -105,6 +105,30 @@ def _lookup_youtube_metadata(query: str) -> Optional[dict]:
                 return None
             entry = entries[0]
             vid_id = entry.get("id")
+            raw_title = (entry.get("title") or "").strip()
+            channel = (entry.get("channel") or entry.get("uploader") or "").strip()
+
+            # Si extract_flat no trajo el nombre del canal/artista, consultarlo por YouTube oEmbed (50ms, nunca falla)
+            if not channel and vid_id:
+                try:
+                    oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid_id}&format=json"
+                    req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        odata = json.loads(resp.read().decode("utf-8"))
+                        channel = (odata.get("author_name") or "").strip()
+                        if not raw_title:
+                            raw_title = (odata.get("title") or "").strip()
+                except Exception:
+                    pass
+
+            # Limpiar sufijos típicos de canales de artistas en YouTube
+            clean_channel = channel.replace(" - Topic", "").replace("VEVO", "").strip()
+
+            if clean_channel and clean_channel.lower() not in raw_title.lower():
+                display_title = f"{clean_channel} - {raw_title}"
+            else:
+                display_title = raw_title
+
             url = entry.get("url") or (f"https://www.youtube.com/watch?v={vid_id}" if vid_id else None)
             thumbs = entry.get("thumbnails") or []
             thumb = thumbs[-1].get("url") if thumbs else (
@@ -112,7 +136,9 @@ def _lookup_youtube_metadata(query: str) -> Optional[dict]:
             )
             return {
                 "id": vid_id,
-                "title": entry.get("title"),
+                "title": raw_title,
+                "display_title": display_title,
+                "channel": clean_channel,
                 "url": url,
                 "duration": entry.get("duration"),
                 "thumbnail": thumb,
@@ -123,8 +149,7 @@ def _lookup_youtube_metadata(query: str) -> Optional[dict]:
 
 def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -> Optional[tuple[str, dict]]:
     """
-    Descarga el audio a un archivo temporal en /tmp usando el descargador interno de yt-dlp
-    (evita el error 403 Forbidden cuando ffmpeg intenta leer URLs remotas directamente).
+    Descarga el audio a un archivo temporal en /tmp usando el descargador interno de yt-dlp.
     Retorna (ruta_archivo_descargado, info_dict) o None.
     """
     token = uuid.uuid4().hex[:10]
@@ -138,7 +163,7 @@ def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -
         "no_warnings": True,
         "ignoreerrors": True,
         "outtmpl": outtmpl,
-        "max_filesize": 40 * 1024 * 1024,  # Límite seguro de 40 MB
+        "max_filesize": 40 * 1024 * 1024,
         "logger": _QuietYdlLogger(),
     }
     if extra_opts:
@@ -159,6 +184,16 @@ def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -
             else:
                 chosen = info
 
+            # Ignorar si el formato descargado es únicamente un preview de 30s de SoundCloud Go+
+            fmt_id = str(chosen.get("format_id") or "").lower()
+            if "preview" in fmt_id:
+                for f in glob.glob(os.path.join(tmp_dir, f"victini_{token}.*")):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+                return None
+
             matches = glob.glob(os.path.join(tmp_dir, f"victini_{token}.*"))
             valid_files = [
                 f for f in matches
@@ -177,11 +212,58 @@ def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -
         return None
 
 
-def _download_sc_non_drm(query: str) -> Optional[tuple[str, dict]]:
+def _score_sc_candidate(entry: dict, yt_meta: Optional[dict], query: str) -> float:
     """
-    Busca en SoundCloud las primeras 6 coincidencias, filtra las que sean previews de 30s o DRM
-    y descarga la primera canción completa a un archivo temporal.
+    Puntúa cada resultado candidato comparando su duración y artista/título con el video oficial de YouTube.
     """
+    score = 0.0
+    sc_title = f"{entry.get('title') or ''} {entry.get('uploader') or ''}".lower()
+    sc_dur = entry.get("duration") or 0
+
+    if yt_meta:
+        yt_dur = yt_meta.get("duration") or 0
+        yt_channel = (yt_meta.get("channel") or "").lower()
+        yt_title = (yt_meta.get("title") or "").lower()
+
+        # Coincidencia de duración con el video de YouTube (muy fuerte indicador de que es la misma canción exacta)
+        if yt_dur > 0 and sc_dur > 0:
+            diff = abs(sc_dur - yt_dur)
+            if diff <= 3:
+                score += 100.0
+            elif diff <= 8:
+                score += 65.0
+            elif diff <= 15:
+                score += 30.0
+            elif diff > 45:
+                score -= 50.0
+
+        if yt_channel and yt_channel in sc_title:
+            score += 45.0
+
+        for word in yt_title.split():
+            if len(word) >= 3 and word in sc_title:
+                score += 12.0
+    else:
+        for word in query.lower().split():
+            if len(word) >= 3 and word in sc_title:
+                score += 12.0
+
+    return score
+
+
+def _download_sc_non_drm(query: str, yt_meta: Optional[dict] = None) -> Optional[tuple[str, dict]]:
+    """
+    Busca en SoundCloud usando el nombre del artista/canal + título de YouTube,
+    ordena los candidatos por similitud de duración y título con el video de YouTube,
+    y descarga la canción completa exacta.
+    """
+    if yt_meta and yt_meta.get("channel") and yt_meta.get("title"):
+        ch = yt_meta["channel"]
+        ti = yt_meta["title"]
+        search_q = f"{ch} {ti}" if ch.lower() not in ti.lower() else ti
+    else:
+        search_q = query
+
     flat_opts = {
         "extract_flat": "in_playlist",
         "quiet": True,
@@ -191,15 +273,16 @@ def _download_sc_non_drm(query: str) -> Optional[tuple[str, dict]]:
     }
     try:
         with yt_dlp.YoutubeDL(flat_opts) as ydl:
-            info = ydl.extract_info(f"scsearch6:{query}", download=False)
+            info = ydl.extract_info(f"scsearch8:{search_q}", download=False)
             entries = [e for e in ((info or {}).get("entries") or []) if e and e.get("url")]
     except Exception:
         entries = []
 
-    for entry in entries:
-        dur = entry.get("duration")
-        if dur and dur <= 35:
-            continue
+    # Filtrar pistas demasiado cortas (previews <= 35s) y ordenar por puntaje de coincidencia con YouTube
+    valid_entries = [e for e in entries if not e.get("duration") or e.get("duration") > 35]
+    valid_entries.sort(key=lambda e: _score_sc_candidate(e, yt_meta, query), reverse=True)
+
+    for entry in valid_entries[:5]:
         res = _download_audio_with_ytdlp(entry["url"])
         if res:
             file_path, track_info = res
@@ -215,36 +298,38 @@ def _download_sc_non_drm(query: str) -> Optional[tuple[str, dict]]:
 
 def search_song_sync(query: str, requester: str) -> Optional[Song]:
     """
-    Busca la canción en YouTube primero y descarga el archivo de audio temporalmente
-    para que FFmpegOpusAudio reproduzca audio real sin cortes ni errores 403.
+    Busca la canción en YouTube primero (obteniendo título, canal/artista, duración y miniatura)
+    y descarga el archivo de audio exacto.
     """
     query = query.strip()
     is_url = query.startswith("http://") or query.startswith("https://")
 
     if is_url:
-        res = _download_audio_with_ytdlp(
-            query,
-            extra_opts={"extractor_args": {"youtube": {"player_client": ["visionos", "android_vr", "tv"]}}},
-        )
-        if res:
-            file_path, info = res
-            return Song(
-                title=info.get("title") or "Canción",
-                file_path=file_path,
-                webpage_url=info.get("webpage_url") or query,
-                requester=requester,
-                duration_str=format_duration(info.get("duration")),
-                source_name="YouTube",
-                thumbnail=info.get("thumbnail"),
+        for client_list in [["android_vr"], ["tv_embedded"], ["mediaconnect"], ["android_testsuite"]]:
+            res = _download_audio_with_ytdlp(
+                query,
+                extra_opts={"extractor_args": {"youtube": {"player_client": client_list}}},
             )
+            if res:
+                file_path, info = res
+                return Song(
+                    title=info.get("title") or "Canción",
+                    file_path=file_path,
+                    webpage_url=info.get("webpage_url") or query,
+                    requester=requester,
+                    duration_str=format_duration(info.get("duration")),
+                    source_name="YouTube",
+                    thumbnail=info.get("thumbnail"),
+                )
 
-    # 1. Buscar primero la canción oficial en YouTube
+    # 1. Buscar primero el video oficial en YouTube
     yt_meta = _lookup_youtube_metadata(query)
     yt_url = yt_meta["url"] if yt_meta and yt_meta.get("url") else None
+    display_title = (yt_meta.get("display_title") if yt_meta else None) or query
 
-    # 2. Intentar descargar el audio directo de YouTube (probando clientes visionos / android_vr)
+    # 2. Intentar descargar el audio directo de YouTube con clientes móviles/embebidos (sin pasar por web client)
     if yt_url:
-        for client_list in [["visionos", "android_vr"], ["android_vr"], ["mweb", "tv"]]:
+        for client_list in [["android_vr"], ["tv_embedded"], ["mediaconnect"], ["android_testsuite"]]:
             res = _download_audio_with_ytdlp(
                 yt_url,
                 extra_opts={"extractor_args": {"youtube": {"player_client": client_list}}},
@@ -252,7 +337,7 @@ def search_song_sync(query: str, requester: str) -> Optional[Song]:
             if res:
                 file_path, info = res
                 return Song(
-                    title=yt_meta.get("title") or info.get("title") or query,
+                    title=display_title,
                     file_path=file_path,
                     webpage_url=yt_url,
                     requester=requester,
@@ -261,17 +346,16 @@ def search_song_sync(query: str, requester: str) -> Optional[Song]:
                     thumbnail=yt_meta.get("thumbnail") or info.get("thumbnail"),
                 )
 
-    # 3. Si YouTube bloquea la IP de Render para la descarga directa del stream,
-    #    descargamos el stream de audio completo equivalente manteniendo la ficha de YouTube
-    sc_res = _download_sc_non_drm(query)
+    # 3. Si YouTube bloquea la IP de Render, buscar la misma canción incluyendo el canal/artista de YouTube
+    #    y verificando que coincida la duración con el video de YouTube
+    sc_res = _download_sc_non_drm(query, yt_meta=yt_meta)
     if sc_res:
         file_path, sc_info = sc_res
-        title = (yt_meta.get("title") if yt_meta else None) or sc_info.get("title") or query
         webpage_url = yt_url or sc_info.get("webpage_url") or "https://www.youtube.com"
         duration_str = format_duration(sc_info.get("duration") or (yt_meta.get("duration") if yt_meta else None))
         thumbnail = (yt_meta.get("thumbnail") if yt_meta else None) or sc_info.get("thumbnail")
         return Song(
-            title=title,
+            title=display_title,
             file_path=file_path,
             webpage_url=webpage_url,
             requester=requester,
@@ -301,7 +385,6 @@ class CleanFFmpegOpusAudio(discord.FFmpegOpusAudio):
 def create_audio_source(file_path: str) -> discord.AudioSource:
     """
     Lee el archivo de audio local descargado y lo codifica a Opus directamente con ffmpeg.
-    No usa from_probe (que requiere ffprobe) ni FFmpegPCMAudio (que requiere libopus.so del sistema).
     """
     return CleanFFmpegOpusAudio(
         file_path,
@@ -424,7 +507,7 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
             print(f"⚠️ No se pudo enviar embed de reproducción: {e}", flush=True)
 
 
-def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
+def setup_music_commands(bot: commands.Bot) -> None:
     """Registra los comandos slash de música (/victiniplay, /victiniskip, /victinistop, /victinicola) en el árbol del bot."""
 
     @bot.tree.command(
@@ -480,7 +563,7 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
         except Exception as e:
             cleanup_song_file(song)
             await interaction.followup.send(
-                f"⚠️ No pude conectarme al canal de voz **{target_voice_channel.name}** (verificá mis permisos de Conectar y Hablar): `{e}`"
+                f"⚠️ No pude conectarme al canal de voz **{target_voice_channel.name}** (verificá mis permisos de Conectar y Hablar): `{type(e).__name__}: {e}`"
             )
             return
 
