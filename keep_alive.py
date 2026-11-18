@@ -1,4 +1,6 @@
 import os
+import time
+import urllib.request
 from threading import Thread
 from flask import Flask, jsonify
 from database import get_global_web_leaderboard
@@ -13,6 +15,11 @@ def add_security_headers(response):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     return response
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "bot": "Victini Bot - SNAP!"})
 
 
 @app.route("/api/leaderboard")
@@ -256,11 +263,9 @@ def home():
                 frame++;
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-                // Suelo
                 ctx.fillStyle = '#ff6b35';
                 ctx.fillRect(0, 150, canvas.width, 3);
 
-                // Física Victini
                 victini.vy += 0.55;
                 victini.y += victini.vy;
                 if (victini.y >= 122) {
@@ -269,7 +274,6 @@ def home():
                     victini.grounded = true;
                 }
 
-                // Dibujar Victini (cuerpo + orejas en V)
                 ctx.fillStyle = '#ffb703';
                 ctx.fillRect(victini.x, victini.y, victini.size, victini.size);
                 ctx.fillStyle = '#fb5607';
@@ -282,7 +286,6 @@ def home():
                 ctx.lineTo(victini.x + 26, victini.y);
                 ctx.fill();
 
-                // Obstáculos
                 if (frame % 75 === 0) {
                     obstacles.push({ x: canvas.width, y: 124, w: 20, h: 26 });
                 }
@@ -293,7 +296,6 @@ def home():
                     ctx.fillStyle = '#e71d36';
                     ctx.fillRect(ob.x, ob.y, ob.w, ob.h);
 
-                    // Colisión
                     if (
                         victini.x < ob.x + ob.w &&
                         victini.x + victini.size > ob.x &&
@@ -336,6 +338,29 @@ def run():
     app.run(host="0.0.0.0", port=port)
 
 
+def self_ping_loop():
+    """
+    Envía un ping externo cada 8 minutos a la URL pública de Render
+    para evitar que el plan gratuito de Render suspenda (spin down) el contenedor tras 15 min de inactividad.
+    """
+    external_url = os.environ.get("RENDER_EXTERNAL_URL", "https://victini.onrender.com").rstrip("/")
+    ping_url = f"{external_url}/health"
+    time.sleep(30)
+    while True:
+        try:
+            req = urllib.request.Request(
+                ping_url,
+                headers={"User-Agent": "Victini-KeepAlive/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                _ = resp.read()
+        except Exception as e:
+            print(f"⚠️ Self-ping warning: {e}")
+        time.sleep(480)  # Cada 8 minutos
+
+
 def keep_alive():
     t = Thread(target=run, daemon=True)
     t.start()
+    p = Thread(target=self_ping_loop, daemon=True)
+    p.start()

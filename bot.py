@@ -16,6 +16,7 @@ from database import (
     get_leaderboard,
     xp_for_next_level,
 )
+from music import setup_music_commands
 
 load_dotenv()
 
@@ -164,13 +165,15 @@ class VictiniBot(commands.Bot):
         intents = discord.Intents.default()
         intents.members = True          # Necesario para detectar nuevos miembros (on_member_join)
         intents.message_content = True  # Necesario para procesar mensajes y otorgar XP
+        intents.voice_states = True     # Necesario para conectarse y reproducir música en canales de voz
 
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
         init_db()
+        setup_music_commands(self)
         await self.tree.sync()
-        print("🔥 Comandos slash (/nivel y /ranking) sincronizados correctamente.")
+        print("🔥 Comandos slash (/nivel, /ranking, /play, /skip, /stop, /cola) sincronizados correctamente.")
 
     async def on_ready(self):
         print(f"✅ Victini Bot conectado como {self.user} (ID: {self.user.id})")
