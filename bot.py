@@ -75,10 +75,18 @@ def normalize_channel_name(name: str) -> str:
     return unicodedata.normalize("NFKC", name).lower().strip()
 
 
+def clean_alnum(name: str) -> str:
+    """Extrae solo letras y números ASCII tras normalizar Unicode (ignora emojis, guiones y espacios)."""
+    norm = normalize_channel_name(name)
+    return "".join(ch for ch in norm if ch.isascii() and ch.isalnum())
+
+
 def find_target_channel(guild: discord.Guild, target_name: str) -> Optional[discord.TextChannel]:
     """
-    Busca un canal de texto por su nombre exacto (ej. '🫂𝑩𝑰𝑬𝑵𝑽𝑬𝑵𝑰𝑫𝑰𝑻𝑻𝑶𝑺').
-    Si no hay coincidencia exacta, intenta coincidencia normalizada por seguridad.
+    Busca un canal de texto por:
+    1. Nombre exacto (ej. '🔥𝑽𝑰𝑪𝑻𝑰𝑵𝑰-𝑼𝑷𝑫𝑨𝑻𝑬𝑺🔥')
+    2. Nombre normalizado NFKC
+    3. Letras alfanuméricas limpias (ej. 'victiniupdates')
     """
     for channel in guild.text_channels:
         if channel.name == target_name:
@@ -89,6 +97,12 @@ def find_target_channel(guild: discord.Guild, target_name: str) -> Optional[disc
         if normalize_channel_name(channel.name) == normalized_target:
             return channel
 
+    alnum_target = clean_alnum(target_name)
+    if alnum_target:
+        for channel in guild.text_channels:
+            if clean_alnum(channel.name) == alnum_target:
+                return channel
+
     return None
 
 
@@ -98,7 +112,9 @@ def is_snap_level_channel(channel: Optional[discord.abc.GuildChannel]) -> bool:
         return False
     if channel.name == LEVEL_CHANNEL_NAME:
         return True
-    return normalize_channel_name(channel.name) == normalize_channel_name(LEVEL_CHANNEL_NAME)
+    if normalize_channel_name(channel.name) == normalize_channel_name(LEVEL_CHANNEL_NAME):
+        return True
+    return clean_alnum(channel.name) == clean_alnum(LEVEL_CHANNEL_NAME)
 
 
 def build_ranking_embed(

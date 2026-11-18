@@ -20,14 +20,32 @@ FFMPEG_BEFORE_OPTIONS = (
 )
 FFMPEG_OPTIONS = "-vn"
 
+
+class _QuietYdlLogger:
+    """Silencia errores intermedios de yt-dlp (ej. pistas Go+ DRM o bloqueo YouTube) para no ensuciar los logs de Render."""
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        pass
+
+
 YDL_BASE_OPTS = {
     "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
+    "ignoreerrors": True,
     "default_search": "auto",
     "source_address": "0.0.0.0",
     "extract_flat": False,
+    "logger": _QuietYdlLogger(),
 }
 
 
@@ -76,20 +94,26 @@ def _extract_with_ytdlp(search_target: str, source_label: str, requester: str) -
         info = ydl.extract_info(search_target, download=False)
         if not info:
             return None
+
+        candidate = None
         if "entries" in info:
-            entries = [e for e in info["entries"] if e]
+            entries = [e for e in (info.get("entries") or []) if e and e.get("url")]
             if not entries:
                 return None
-            info = entries[0]
+            # Priorizar pistas completas (> 35 segundos) que no sean solo previews de 30s
+            full_tracks = [e for e in entries if (e.get("duration") or 0) > 35]
+            candidate = full_tracks[0] if full_tracks else entries[0]
+        else:
+            candidate = info
 
-        stream_url = info.get("url")
+        stream_url = candidate.get("url")
         if not stream_url:
             return None
 
-        title = info.get("title") or "Canción sin título"
-        webpage_url = info.get("webpage_url") or stream_url
-        duration_str = format_duration(info.get("duration"))
-        thumbnail = info.get("thumbnail")
+        title = candidate.get("title") or "Canción sin título"
+        webpage_url = candidate.get("webpage_url") or stream_url
+        duration_str = format_duration(candidate.get("duration"))
+        thumbnail = candidate.get("thumbnail")
 
         return Song(
             title=title,
@@ -103,7 +127,7 @@ def _extract_with_ytdlp(search_target: str, source_label: str, requester: str) -
 
 
 def _search_itunes_fallback(query: str, requester: str) -> Optional[Song]:
-    """Fallback ultrarrápido si tanto YouTube como SoundCloud bloquean la IP del servidor."""
+    """Fallback ultrarrápido si tanto SoundCloud como YouTube fallan para una búsqueda."""
     encoded = urllib.parse.quote(query)
     url = f"https://itunes.apple.com/search?term={encoded}&media=music&limit=1"
     req = urllib.request.Request(url, headers={"User-Agent": "VictiniBot/1.0"})
@@ -132,10 +156,11 @@ def _search_itunes_fallback(query: str, requester: str) -> Optional[Song]:
 
 def search_song_sync(query: str, requester: str) -> Optional[Song]:
     """
-    Busca una canción por nombre o URL.
+    Busca una canción por nombre o URL:
     1. Si es URL directa, la extrae con yt-dlp.
-    2. Si es nombre de canción, intenta SoundCloud (scsearch1, ideal para IPs de Render sin bloqueo de bot)
-       y YouTube (ytsearch1), con fallback a Apple Music.
+    2. Si es nombre de canción, busca hasta 6 resultados en SoundCloud (scsearch6:) saltando
+       automáticamente cualquier pista con DRM y eligiendo la primera canción completa reproducible.
+    3. Si no encuentra en SoundCloud, prueba YouTube (ytsearch1:) y Apple Music como respaldo.
     """
     query = query.strip()
     is_url = query.startswith("http://") or query.startswith("https://")
@@ -143,31 +168,29 @@ def search_song_sync(query: str, requester: str) -> Optional[Song]:
     if is_url:
         try:
             return _extract_with_ytdlp(query, "Enlace directo", requester)
-        except Exception as e:
-            print(f"⚠️ Error extrayendo URL directa ({query}): {e}")
+        except Exception:
             return None
 
-    # 1. Intentar SoundCloud primero (no sufre bloqueo anti-bot en servidores cloud como Render)
+    # 1. SoundCloud multi-resultado (salta pistas Go+ con DRM y elige la primera canción completa)
     try:
-        song = _extract_with_ytdlp(f"scsearch1:{query}", "SoundCloud", requester)
+        song = _extract_with_ytdlp(f"scsearch6:{query}", "SoundCloud", requester)
         if song:
             return song
-    except Exception as e:
-        print(f"⚠️ SoundCloud search falló para '{query}': {e}")
+    except Exception:
+        pass
 
-    # 2. Intentar YouTube
+    # 2. YouTube
     try:
         song = _extract_with_ytdlp(f"ytsearch1:{query}", "YouTube", requester)
         if song:
             return song
-    except Exception as e:
-        print(f"⚠️ YouTube search falló para '{query}': {e}")
+    except Exception:
+        pass
 
     # 3. Fallback a Apple Music
     try:
         return _search_itunes_fallback(query, requester)
-    except Exception as e:
-        print(f"⚠️ Fallback iTunes falló para '{query}': {e}")
+    except Exception:
         return None
 
 
@@ -240,7 +263,7 @@ class MusicControlView(discord.ui.View):
             await interaction.response.send_message("No hay ninguna canción para saltar.", ephemeral=True)
             return
 
-        vc.stop()  # Dispara el callback after -> play_next
+        vc.stop()
         await interaction.response.send_message("⏭️ ¡Canción saltada! Pasando a la siguiente... 🔥")
 
     @discord.ui.button(label="⏹️ Detener y Salir", style=discord.ButtonStyle.danger)
@@ -273,7 +296,7 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
     try:
         source = await create_audio_source(next_song.stream_url)
     except Exception as e:
-        print(f"❌ Error creando fuente de audio para '{next_song.title}': {e}")
+        print(f"❌ Error creando fuente de audio para '{next_song.title}': {e}", flush=True)
         if state.text_channel:
             await state.text_channel.send(
                 f"⚠️ No pude reproducir **{next_song.title}**, pasando a la siguiente..."
@@ -283,7 +306,7 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
 
     def _after_playback(error: Optional[Exception]):
         if error:
-            print(f"⚠️ Error en reproducción de voz: {error}")
+            print(f"⚠️ Error en reproducción de voz: {error}", flush=True)
         asyncio.run_coroutine_threadsafe(play_next(guild_id, loop), loop)
 
     vc.play(source, after=_after_playback)
@@ -294,7 +317,7 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
         try:
             await state.text_channel.send(embed=embed, view=view)
         except Exception as e:
-            print(f"⚠️ No se pudo enviar embed de reproducción: {e}")
+            print(f"⚠️ No se pudo enviar embed de reproducción: {e}", flush=True)
 
 
 def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
@@ -313,9 +336,6 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
             )
             return
 
-        # Determinar a qué canal de voz conectarse:
-        # 1. Si el usuario está conectado a un canal de voz, usar ese.
-        # 2. Si el comando se tiró en el chat integrado de un canal de voz, usar ese canal de voz.
         target_voice_channel: Optional[discord.VoiceChannel | discord.StageChannel] = None
         if interaction.user.voice and interaction.user.voice.channel:
             target_voice_channel = interaction.user.voice.channel
@@ -331,7 +351,6 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
 
         await interaction.response.defer()
 
-        # Buscar la canción en un hilo secundario para no bloquear el bot
         song = await asyncio.to_thread(
             search_song_sync,
             cancion,
@@ -347,7 +366,6 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
         state = get_guild_state(interaction.guild.id)
         state.text_channel = interaction.channel
 
-        # Conectar o mover a Victini al canal de voz
         vc = interaction.guild.voice_client
         try:
             if vc is None or not vc.is_connected():
@@ -361,7 +379,6 @@ def setup_music_commands(bot: discord.ext.commands.Bot) -> None:
             )
             return
 
-        # Si ya está reproduciendo o en pausa, agregar a la cola
         if vc.is_playing() or vc.is_paused():
             state.queue.append(song)
             embed = build_now_playing_embed(
