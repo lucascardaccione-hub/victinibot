@@ -129,10 +129,10 @@ def is_snap_level_channel(channel: Optional[discord.abc.GuildChannel]) -> bool:
 
 
 # ==========================================
-# PERSISTENCIA EN LA NUBE (RESPALDO OCULTO EN DISCORD)
-# Evita que se pierdan los niveles cuando Render reinicia o hace deploy
+# PERSISTENCIA EXTERNA SEGURA (CERO CANALES EN DISCORD)
+# Soporta PostgreSQL (DATABASE_URL) o GitHub Gist privado (GITHUB_BACKUP_TOKEN + BACKUP_GIST_ID).
+# Además, si quedó el canal antiguo `victini-db-backup`, migra sus datos y lo elimina automáticamente.
 # ==========================================
-_backup_messages: dict[int, discord.Message] = {}
 _last_backup_ts: dict[int, float] = {}
 _backup_locks: dict[int, asyncio.Lock] = {}
 
@@ -143,35 +143,11 @@ def _get_backup_lock(guild_id: int) -> asyncio.Lock:
     return _backup_locks[guild_id]
 
 
-async def get_or_create_backup_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
-    """Obtiene o crea el canal privado oculto `victini-db-backup` (solo visible para Admins)."""
-    existing = discord.utils.get(guild.text_channels, name=BACKUP_CHANNEL_NAME)
-    if existing is not None:
-        return existing
-    try:
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            guild.me: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                attach_files=True,
-            ),
-        }
-        channel = await guild.create_text_channel(
-            name=BACKUP_CHANNEL_NAME,
-            overwrites=overwrites,
-            reason="Canal oculto de respaldo automático para no perder niveles/XP de SNAP! al reiniciar Render",
-        )
-        print(f"💾 Canal oculto de respaldo '{BACKUP_CHANNEL_NAME}' creado en '{guild.name}'.", flush=True)
-        return channel
-    except Exception as e:
-        print(f"⚠️ No se pudo crear canal de respaldo en {guild.name}: {e}", flush=True)
-        return None
-
-
-async def restore_levels_from_discord(guild: discord.Guild) -> None:
-    """Restaura automáticamente la tabla de niveles desde el último respaldo en `victini-db-backup`."""
+async def cleanup_legacy_discord_backup_channel(guild: discord.Guild) -> None:
+    """
+    Si existe el canal antiguo `victini-db-backup`, recupera sus datos a la base actual
+    y lo elimina automáticamente para mantener limpio el servidor Discord.
+    """
     ch = discord.utils.get(guild.text_channels, name=BACKUP_CHANNEL_NAME)
     if ch is None:
         return
@@ -186,18 +162,65 @@ async def restore_levels_from_discord(guild: discord.Guild) -> None:
                         raw = await att.read()
                         records = json.loads(raw.decode("utf-8"))
                         restored = import_guild_levels(guild.id, records)
-                        _backup_messages[guild.id] = msg
                         print(
-                            f"♻️ Niveles restaurados en '{guild.name}': {restored} usuarios recuperados.",
+                            f"♻️ Migrados {restored} registros desde '{BACKUP_CHANNEL_NAME}' en '{guild.name}'.",
                             flush=True,
                         )
-                        return
+                        break
     except Exception as e:
-        print(f"⚠️ Error restaurando respaldo en {guild.name}: {e}", flush=True)
+        print(f"⚠️ Error leyendo '{BACKUP_CHANNEL_NAME}' antes de borrarlo: {e}", flush=True)
+
+    try:
+        await ch.delete(reason="Eliminando canal temporal de respaldo para mantener limpio el servidor SNAP!")
+        print(f"🧹 Canal '{BACKUP_CHANNEL_NAME}' eliminado de '{guild.name}'.", flush=True)
+    except Exception as e:
+        print(f"⚠️ No se pudo eliminar '{BACKUP_CHANNEL_NAME}': {e}", flush=True)
+
+
+async def restore_levels_from_external(guild: discord.Guild) -> None:
+    """Restaura niveles desde GitHub Gist privado si está configurado (cuando no se usa PostgreSQL)."""
+    gist_id = os.getenv("BACKUP_GIST_ID", "").strip()
+    gh_token = os.getenv("GITHUB_BACKUP_TOKEN", "").strip()
+    if not gist_id or not gh_token:
+        return
+
+    def _fetch_gist():
+        req = urllib.request.Request(
+            f"https://api.github.com/gists/{gist_id}",
+            headers={
+                "Authorization": f"Bearer {gh_token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "VictiniBot-SNAP/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            files = data.get("files") or {}
+            fname = f"victini_snap_{guild.id}.json"
+            if fname in files and files[fname].get("content"):
+                return json.loads(files[fname]["content"])
+        return None
+
+    try:
+        payload = await asyncio.to_thread(_fetch_gist)
+        if payload:
+            restored = import_guild_levels(guild.id, payload)
+            print(f"♻️ Respaldo externo restaurado para '{guild.name}': {restored} usuarios.", flush=True)
+    except Exception as e:
+        print(f"⚠️ No se pudo restaurar respaldo externo: {e}", flush=True)
 
 
 async def sync_levels_backup(guild: discord.Guild, force: bool = False) -> None:
-    """Guarda el JSON actualizado de niveles en el canal oculto `victini-db-backup`."""
+    """
+    Si está configurado un GitHub Gist privado (GITHUB_BACKUP_TOKEN + BACKUP_GIST_ID),
+    respalda allí de forma segura sin crear ningún canal en Discord.
+    (Si se usa DATABASE_URL de PostgreSQL, los datos ya persisten directo en la nube).
+    """
+    gist_id = os.getenv("BACKUP_GIST_ID", "").strip()
+    gh_token = os.getenv("GITHUB_BACKUP_TOKEN", "").strip()
+    if not gist_id or not gh_token:
+        return
+
     now = time.time()
     if not force and (now - _last_backup_ts.get(guild.id, 0.0) < BACKUP_THROTTLE_SECONDS):
         return
@@ -207,40 +230,40 @@ async def sync_levels_backup(guild: discord.Guild, force: bool = False) -> None:
         if not force and (now - _last_backup_ts.get(guild.id, 0.0) < BACKUP_THROTTLE_SECONDS):
             return
 
-        ch = await get_or_create_backup_channel(guild)
-        if ch is None:
-            return
-
         records = export_guild_levels(guild.id)
-        total_levels = len(records.get("levels") or [])
-        total_teams = len(records.get("teams") or [])
-        if total_levels == 0 and total_teams == 0:
+        if not (records.get("levels") or []) and not (records.get("teams") or []):
             return
 
-        payload = json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        file_obj = discord.File(io.BytesIO(payload), filename="victini_levels_backup.json")
-        summary = f"💾 Respaldo automático SNAP! • {total_levels} usuarios • {total_teams} Pokémon • <t:{int(now)}:R>"
+        body = json.dumps(
+            {
+                "files": {
+                    f"victini_snap_{guild.id}.json": {
+                        "content": json.dumps(records, ensure_ascii=False, separators=(",", ":"))
+                    }
+                }
+            }
+        ).encode("utf-8")
+
+        def _patch_gist():
+            req = urllib.request.Request(
+                f"https://api.github.com/gists/{gist_id}",
+                data=body,
+                method="PATCH",
+                headers={
+                    "Authorization": f"Bearer {gh_token}",
+                    "Accept": "application/vnd.github+json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "VictiniBot-SNAP/1.0",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status
 
         try:
-            msg = _backup_messages.get(guild.id)
-            if msg is not None:
-                await msg.edit(content=summary, attachments=[file_obj])
-            else:
-                # Buscar si ya existía un mensaje previo en el historial antes de crear uno nuevo
-                existing_msg = None
-                async for h_msg in ch.history(limit=5):
-                    if h_msg.author.id == guild.me.id and h_msg.attachments:
-                        existing_msg = h_msg
-                        break
-                if existing_msg is not None:
-                    await existing_msg.edit(content=summary, attachments=[file_obj])
-                    _backup_messages[guild.id] = existing_msg
-                else:
-                    new_msg = await ch.send(content=summary, file=file_obj)
-                    _backup_messages[guild.id] = new_msg
+            await asyncio.to_thread(_patch_gist)
             _last_backup_ts[guild.id] = time.time()
         except Exception as e:
-            print(f"⚠️ Error guardando respaldo de niveles en {guild.name}: {e}", flush=True)
+            print(f"⚠️ Error guardando respaldo externo: {e}", flush=True)
 
 
 async def notify_level_up(guild: discord.Guild, member: discord.Member, new_level: int) -> None:
@@ -381,8 +404,9 @@ class VictiniBot(commands.Bot):
             commit_time_str = get_latest_commit_time_str()
 
             for guild in self.guilds:
-                # 1. Restaurar niveles y experiencia desde el canal oculto antes de nada
-                await restore_levels_from_discord(guild)
+                # 1. Migrar y eliminar el canal antiguo `victini-db-backup` si existe + restaurar respaldo externo
+                await cleanup_legacy_discord_backup_channel(guild)
+                await restore_levels_from_external(guild)
 
                 # 2. Limpiar comandos duplicados de servidor
                 try:
