@@ -89,53 +89,32 @@ def format_duration(seconds: Optional[float]) -> str:
 
 def _prepare_hq_opus_file(raw_file_path: str, acodec: Optional[str] = None) -> str:
     """
-    Convierte o remuxea el archivo descargado a un contenedor Ogg Opus (.opus) de alta fidelidad
-    ANTES de iniciar la reproducción en Discord.
-    - Si ya es Opus nativo (Format 251 .webm 160kbps 48kHz), copia las tramas sin pérdida (-c:a copy).
-    - Si es AAC/MP3 (.m4a/.mp3), lo codifica a Opus 48kHz Stereo 160kbps VBR con máxima calidad
-      (-compression_level 10 -application audio) y normalización suave de volumen.
-    De este modo, durante la reproducción en vivo en Render Free Tier (0.1 CPU) NO corre ningún subproceso ffmpeg,
-    eliminando al 100% los microcortes, saturación y distorsión por límite de CPU.
+    Convierte el archivo descargado a un contenedor Ogg Opus (.opus) calibrado para Discord
+    ANTES de iniciar la reproducción:
+    - Aplica headroom de -7dB (evita los +650,000 samples saturados a 0.0 dBFS que distorsionan el decodificador de Discord).
+    - Aplica aresample=async=1:first_pts=0 para corregir saltos de timestamps entre fragmentos HLS.
+    - Habilita FEC (-fec true -packet_loss 15) a 96kbps 48kHz Stereo para evitar microcortes UDP.
     """
-    base, ext = os.path.splitext(raw_file_path)
+    base, _ = os.path.splitext(raw_file_path)
     opus_path = f"{base}_hq.opus"
 
-    is_native_opus = "opus" in (acodec or "").lower() or ext.lower() == ".webm"
-
-    if is_native_opus:
-        cmd = [
-            FFMPEG_EXECUTABLE,
-            "-y",
-            "-i", raw_file_path,
-            "-map_metadata", "-1",
-            "-vn",
-            "-c:a", "copy",
-            "-f", "opus",
-            opus_path,
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if res.returncode == 0 and os.path.exists(opus_path) and os.path.getsize(opus_path) > 1024:
-            try:
-                os.remove(raw_file_path)
-            except Exception:
-                pass
-            return opus_path
-
-    # Codificación HQ a Ogg Opus 48kHz Stereo 160kbps antes de reproducir
     cmd_encode = [
         FFMPEG_EXECUTABLE,
         "-y",
         "-i", raw_file_path,
         "-map_metadata", "-1",
         "-vn",
+        "-af", "volume=-7dB,aresample=async=1:first_pts=0",
         "-c:a", "libopus",
         "-ar", "48000",
         "-ac", "2",
-        "-b:a", "160k",
+        "-b:a", "96k",
         "-vbr", "on",
         "-compression_level", "10",
         "-frame_duration", "20",
         "-application", "audio",
+        "-fec", "true",
+        "-packet_loss", "15",
         "-f", "opus",
         opus_path,
     ]
@@ -220,12 +199,13 @@ def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -
     outtmpl = os.path.join(tmp_dir, f"victini_{token}.%(ext)s")
 
     opts = {
-        "format": "251/hls_aac_160k/http_mp3_1_0/bestaudio[acodec=opus]/bestaudio[abr>=128]/bestaudio/best",
+        "format": "251/http_mp3_1_0/hls_aac_160k/bestaudio[acodec=opus]/bestaudio[abr>=128]/bestaudio/best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "ignoreerrors": True,
         "outtmpl": outtmpl,
+        "ffmpeg_location": FFMPEG_EXECUTABLE,
         "max_filesize": 45 * 1024 * 1024,
         "logger": _QuietYdlLogger(),
     }
