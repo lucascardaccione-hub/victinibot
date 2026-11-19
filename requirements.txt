@@ -5,4 +5,5 @@ python-dotenv>=1.0.1
 flask>=3.0.0
 yt-dlp>=2024.8.6
 imageio-ffmpeg>=0.5.1
+pg8000>=1.31.0
 audioop-lts; python_version >= '3.13'
