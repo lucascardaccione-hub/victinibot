@@ -19,12 +19,14 @@ from database import (
     init_db,
     add_xp,
     get_user_stats,
+    get_pokeballs,
     get_leaderboard,
     xp_for_next_level,
     export_guild_levels,
     import_guild_levels,
 )
 from music import setup_music_commands
+from pokemon_game import setup_pokemon_commands
 
 # Forzar salida sin buffer en Render para que todos los print() aparezcan al instante en los Logs
 sys.stdout.reconfigure(line_buffering=True)
@@ -210,12 +212,14 @@ async def sync_levels_backup(guild: discord.Guild, force: bool = False) -> None:
             return
 
         records = export_guild_levels(guild.id)
-        if not records:
+        total_levels = len(records.get("levels") or [])
+        total_teams = len(records.get("teams") or [])
+        if total_levels == 0 and total_teams == 0:
             return
 
         payload = json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         file_obj = discord.File(io.BytesIO(payload), filename="victini_levels_backup.json")
-        summary = f"💾 Respaldo automático SNAP! • {len(records)} usuarios • <t:{int(now)}:R>"
+        summary = f"💾 Respaldo automático SNAP! • {total_levels} usuarios • {total_teams} Pokémon • <t:{int(now)}:R>"
 
         try:
             msg = _backup_messages.get(guild.id)
@@ -243,9 +247,11 @@ async def notify_level_up(guild: discord.Guild, member: discord.Member, new_leve
     """Envía el aviso oficial de subida de nivel únicamente por 🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀."""
     level_channel = find_target_channel(guild, LEVEL_CHANNEL_NAME)
     if level_channel is not None:
+        pokeballs = get_pokeballs(guild.id, member.id)
         level_up_msg = (
             f"{member.mention} ha subido al nivel {new_level}. "
-            f"Espero que haya sido de forma legal 👀 o mis llamas actuarán rápidamente con severas consecuencias 🔥😈"
+            f"Espero que haya sido de forma legal 👀 o mis llamas actuarán rápidamente con severas consecuencias 🔥😈\n"
+            f"🎱 ¡Recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** para usar en `/catch`)*"
         )
         await level_channel.send(level_up_msg)
     else:
@@ -365,6 +371,7 @@ class VictiniBot(commands.Bot):
     async def setup_hook(self):
         init_db()
         setup_music_commands(self)
+        setup_pokemon_commands(self, sync_levels_backup, find_target_channel)
         print("🔥 Inicializando base de datos y árbol de comandos slash...", flush=True)
 
     async def on_ready(self):
@@ -572,17 +579,18 @@ async def nivel_command(
 
     target = usuario or interaction.user
     level, xp, rank = get_user_stats(interaction.guild.id, target.id)
+    pokeballs = get_pokeballs(interaction.guild.id, target.id)
     next_xp = xp_for_next_level(level)
 
     if rank is not None and rank <= 10:
         frase = (
             f"Tu nivel es **{level}**, ¡felicitaciones! Estás entre los primeros 10 🔥 "
-            f"*(Puesto #{rank} • {xp}/{next_xp} XP)*"
+            f"*(Puesto #{rank} • {xp}/{next_xp} XP • 🎱 {pokeballs} Pokéballs)*"
         )
     else:
         frase = (
             f"Tu nivel es **{level}**, aún te queda mucho camino por recorrer. "
-            f"*(Puesto #{rank} • {xp}/{next_xp} XP)*"
+            f"*(Puesto #{rank} • {xp}/{next_xp} XP • 🎱 {pokeballs} Pokéballs)*"
         )
 
     if target.id != interaction.user.id:
