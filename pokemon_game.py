@@ -1,12 +1,17 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import io
+import os
 import random
 import time
 import unicodedata
+import urllib.request
 from dataclasses import dataclass
 from typing import Optional, List, Callable, Awaitable
 
 import discord
 from discord.ext import commands
+from PIL import Image, ImageDraw, ImageFont
 
 from database import (
     get_pokeballs,
@@ -43,10 +48,10 @@ class PokemonSpecies:
 
 
 RARITY_CONFIG = {
-    "Común": {"weight": 55, "catch_rate": 0.80, "color": discord.Color.green(), "emoji": "🟢"},
-    "Raro": {"weight": 27, "catch_rate": 0.55, "color": discord.Color.blue(), "emoji": "🔵"},
-    "Épico": {"weight": 13, "catch_rate": 0.35, "color": discord.Color.purple(), "emoji": "🟣"},
-    "Legendario": {"weight": 5, "catch_rate": 0.18, "color": discord.Color.gold(), "emoji": "🟡"},
+    "Común": {"weight": 55, "catch_rate": 0.80, "color": discord.Color.green(), "rgb": (46, 204, 113), "emoji": "🟢"},
+    "Raro": {"weight": 27, "catch_rate": 0.55, "color": discord.Color.blue(), "rgb": (52, 152, 219), "emoji": "🔵"},
+    "Épico": {"weight": 13, "catch_rate": 0.35, "color": discord.Color.purple(), "rgb": (155, 89, 182), "emoji": "🟣"},
+    "Legendario": {"weight": 5, "catch_rate": 0.18, "color": discord.Color.gold(), "rgb": (241, 196, 15), "emoji": "🟡"},
 }
 
 POKEMON_POOL: List[PokemonSpecies] = [
@@ -126,6 +131,188 @@ def roll_wild_pokemon() -> tuple[PokemonSpecies, bool]:
     return species, is_shiny
 
 
+def _load_font(size: int, bold: bool = False):
+    """Carga una fuente TTF disponible en Linux (Render) o Windows, con fallback seguro a Pillow."""
+    candidates = (
+        [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+        ]
+        if bold
+        else [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+        ]
+    )
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size=size)
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _clean_text_for_card(text: str) -> str:
+    """Limpia emojis de color fuera de BMP para evitar cuadros vacíos en fuentes TTF estándar."""
+    return "".join(ch for ch in text if ord(ch) <= 0x024F).strip()
+
+
+def _fetch_image_bytes(url: str) -> Optional[bytes]:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "VictiniBot-SNAP/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return resp.read()
+    except Exception:
+        return None
+
+
+def build_team_card_png(
+    username: str,
+    level: int,
+    pokeballs: int,
+    team: List[dict],
+    avatar_bytes: Optional[bytes] = None,
+) -> bytes:
+    """
+    Genera la imagen PNG de la Ficha de Entrenador SNAP! (920x540) con el username,
+    avatar circular, nivel, Pokéballs y los 6 slots del equipo Pokémon.
+    """
+    W, H = 920, 540
+    img = Image.new("RGBA", (W, H), (16, 17, 36, 255))
+    draw = ImageDraw.Draw(img)
+
+    # Fondo degradado vertical oscuro con tono fuego SNAP!
+    for y in range(H):
+        r = int(15 + (y / H) * 18)
+        g = int(16 + (y / H) * 10)
+        b = int(34 + (y / H) * 20)
+        draw.line([(0, y), (W, y)], fill=(r, g, b, 255))
+
+    # Marco exterior naranja Victini
+    draw.rounded_rectangle([10, 10, W - 11, H - 11], radius=22, outline=(255, 107, 53, 220), width=3)
+
+    # Descargar en paralelo los artworks oficiales de los Pokémon del equipo
+    sprite_bytes_list: List[Optional[bytes]] = []
+    if team:
+        urls = [get_artwork_url(m["pokedex_id"], m["is_shiny"]) for m in team[:6]]
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            sprite_bytes_list = list(pool.map(_fetch_image_bytes, urls))
+
+    # Fuentes
+    f_title = _load_font(30, bold=True)
+    f_sub = _load_font(18, bold=False)
+    f_badge = _load_font(15, bold=True)
+    f_name = _load_font(20, bold=True)
+    f_small = _load_font(14, bold=False)
+
+    # Header: Avatar circular + Username + Stats
+    draw.rounded_rectangle([26, 26, W - 26, 122], radius=16, fill=(28, 30, 58, 240), outline=(255, 159, 28, 120), width=2)
+
+    avatar_x, avatar_y, avatar_size = 42, 38, 72
+    if avatar_bytes:
+        try:
+            av = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA").resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (avatar_size, avatar_size), 0)
+            ImageDraw.Draw(mask).ellipse([0, 0, avatar_size, avatar_size], fill=255)
+            img.paste(av, (avatar_x, avatar_y), mask)
+            draw.ellipse([avatar_x - 2, avatar_y - 2, avatar_x + avatar_size + 2, avatar_y + avatar_size + 2], outline=(255, 159, 28, 255), width=3)
+        except Exception:
+            draw.ellipse([avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size], fill=(255, 107, 53, 255))
+    else:
+        draw.ellipse([avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size], fill=(255, 107, 53, 255))
+
+    clean_user = _clean_text_for_card(username) or "Entrenador"
+    if len(clean_user) > 22:
+        clean_user = clean_user[:21] + "..."
+    draw.text((132, 40), clean_user, font=f_title, fill=(255, 255, 255, 255))
+    draw.text(
+        (132, 78),
+        f"Nivel {level}   |   Pokeballs: {pokeballs}   |   Equipo: {len(team)}/6",
+        font=f_sub,
+        fill=(255, 185, 80, 255),
+    )
+    draw.text((W - 210, 62), "SNAP! TRAINER", font=f_badge, fill=(255, 107, 53, 220))
+
+    # Grid 3x2 para los 6 Pokémon
+    card_w, card_h = 276, 178
+    gap_x, gap_y = 20, 18
+    start_x, start_y = 26, 140
+
+    for slot in range(6):
+        col = slot % 3
+        row = slot // 3
+        x0 = start_x + col * (card_w + gap_x)
+        y0 = start_y + row * (card_h + gap_y)
+        x1 = x0 + card_w
+        y1 = y0 + card_h
+
+        if slot < len(team):
+            mon = team[slot]
+            r_color = RARITY_CONFIG.get(mon["rarity"], {"rgb": (150, 150, 150)})["rgb"]
+            draw.rounded_rectangle(
+                [x0, y0, x1, y1],
+                radius=16,
+                fill=(26, 28, 54, 245),
+                outline=(*r_color, 230),
+                width=2,
+            )
+
+            # Badge de rareza arriba a la derecha
+            rarity_txt = _clean_text_for_card(mon["rarity"]).upper()
+            draw.rounded_rectangle([x1 - 104, y0 + 10, x1 - 10, y0 + 32], radius=8, fill=(*r_color, 210))
+            draw.text((x1 - 96, y0 + 13), rarity_txt[:10], font=_load_font(12, bold=True), fill=(15, 16, 30, 255))
+
+            if mon["is_shiny"]:
+                draw.rounded_rectangle([x0 + 10, y0 + 10, x0 + 68, y0 + 32], radius=8, fill=(255, 215, 0, 230))
+                draw.text((x0 + 16, y0 + 13), "SHINY", font=_load_font(12, bold=True), fill=(20, 20, 20, 255))
+
+            # Sprite del Pokémon
+            sp_bytes = sprite_bytes_list[slot] if slot < len(sprite_bytes_list) else None
+            if sp_bytes:
+                try:
+                    sp = Image.open(io.BytesIO(sp_bytes)).convert("RGBA")
+                    sp.thumbnail((104, 104), Image.Resampling.LANCZOS)
+                    sx = x0 + (card_w - sp.width) // 2
+                    sy = y0 + 24 + (98 - sp.height) // 2
+                    img.paste(sp, (sx, sy), sp)
+                except Exception:
+                    pass
+
+            # Nombre y tipo abajo
+            mon_name = _clean_text_for_card(mon["name"])
+            if mon["is_shiny"]:
+                mon_name = f"* {mon_name}"
+            mon_type = _clean_text_for_card(mon["ptype"])
+            draw.text((x0 + 14, y1 - 52), mon_name[:20], font=f_name, fill=(255, 255, 255, 255))
+            draw.text((x0 + 14, y1 - 26), mon_type[:28], font=f_small, fill=(185, 190, 215, 255))
+        else:
+            # Slot vacío con Pokéball sutil
+            draw.rounded_rectangle(
+                [x0, y0, x1, y1],
+                radius=16,
+                fill=(20, 22, 42, 180),
+                outline=(65, 70, 105, 140),
+                width=2,
+            )
+            cx, cy = x0 + card_w // 2, y0 + 76
+            draw.ellipse([cx - 26, cy - 26, cx + 26, cy + 26], outline=(80, 86, 125, 160), width=3)
+            draw.line([cx - 26, cy, cx + 26, cy], fill=(80, 86, 125, 160), width=3)
+            draw.ellipse([cx - 7, cy - 7, cx + 7, cy + 7], fill=(20, 22, 42, 255), outline=(80, 86, 125, 160), width=3)
+            draw.text((cx - 38, y1 - 38), "Slot vacio", font=f_small, fill=(110, 116, 155, 200))
+
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
 class ReplacePokemonView(discord.ui.View):
     """Permite elegir exactamente qué Pokémon del equipo (6/6) liberar para hacer lugar al nuevo."""
 
@@ -193,7 +380,7 @@ class ReplacePokemonView(discord.ui.View):
                     color=RARITY_CONFIG[self.species.rarity]["color"],
                 )
                 embed.set_thumbnail(url=get_artwork_url(self.species.pokedex_id, self.is_shiny))
-                embed.set_footer(text="Usá /equipo para ver tu equipo completo • Victini Bot 🔥✌️")
+                embed.set_footer(text="Usá /team para ver la imagen de tu equipo • Victini Bot 🔥✌️")
                 await interaction.response.edit_message(embed=embed, view=self)
                 asyncio.create_task(self.on_backup(self.guild, True))
             else:
@@ -258,7 +445,6 @@ class PostCaptureDecisionView(discord.ui.View):
 
         current_team = get_pokemon_team(self.guild.id, self.author_id)
         if len(current_team) >= 6:
-            # Equipo lleno: abrir selector con botones de los 6 Pokémon para elegir a cuál liberar
             shiny_tag = "✨ " if self.is_shiny else ""
             embed = discord.Embed(
                 title="🎒 ¡Tu equipo está lleno (6/6)! 🔄",
@@ -306,7 +492,7 @@ class PostCaptureDecisionView(discord.ui.View):
                 color=RARITY_CONFIG[self.species.rarity]["color"],
             )
             embed.set_thumbnail(url=get_artwork_url(self.species.pokedex_id, self.is_shiny))
-            embed.set_footer(text="Usá /equipo para ver tu equipo completo • Victini Bot 🔥")
+            embed.set_footer(text="Usá /team para ver la imagen de tu equipo • Victini Bot 🔥")
             await interaction.response.edit_message(embed=embed, view=self)
             asyncio.create_task(self.on_backup(self.guild, True))
 
@@ -392,7 +578,6 @@ class WildEncounterView(discord.ui.View):
             asyncio.create_task(self.on_backup(self.guild, True))
             return
 
-        # ¡Capturado!
         team = get_pokemon_team(self.guild.id, self.author_id)
         decision_view = PostCaptureDecisionView(
             guild=self.guild,
@@ -439,12 +624,46 @@ class WildEncounterView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
+async def _send_team_card(interaction: discord.Interaction, usuario: Optional[discord.Member] = None) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Este comando solo funciona dentro del servidor **SNAP!** 🔥",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
+
+    target = usuario or interaction.user
+    team = get_pokemon_team(interaction.guild.id, target.id)
+    pokeballs = get_pokeballs(interaction.guild.id, target.id)
+    level, _, _ = get_user_stats(interaction.guild.id, target.id)
+
+    avatar_bytes: Optional[bytes] = None
+    try:
+        avatar_bytes = await target.display_avatar.with_size(256).read()
+    except Exception:
+        pass
+
+    png_bytes = await asyncio.to_thread(
+        build_team_card_png,
+        target.display_name,
+        level,
+        pokeballs,
+        team,
+        avatar_bytes,
+    )
+
+    file = discord.File(io.BytesIO(png_bytes), filename=f"team_{target.id}.png")
+    await interaction.followup.send(file=file)
+
+
 def setup_pokemon_commands(
     bot: commands.Bot,
     on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
     find_channel_fn: Callable[[discord.Guild, str], Optional[discord.TextChannel]],
 ) -> None:
-    """Registra /catch (exclusivo de 🎮𝑪𝑨𝑻𝑪𝑯) y /equipo en el árbol de comandos de Victini."""
+    """Registra /catch (exclusivo de 🎮𝑪𝑨𝑻𝑪𝑯), /team y /equipo en el árbol de comandos de Victini."""
 
     @bot.tree.command(
         name="catch",
@@ -507,44 +726,15 @@ def setup_pokemon_commands(
         await interaction.response.send_message(embed=embed, view=view)
 
     @bot.tree.command(
+        name="team",
+        description="Genera una imagen con tu username y tu equipo de hasta 6 Pokémon 🎒🔥",
+    )
+    async def team_command(interaction: discord.Interaction, usuario: Optional[discord.Member] = None):
+        await _send_team_card(interaction, usuario)
+
+    @bot.tree.command(
         name="equipo",
-        description="Muestra tu equipo de hasta 6 Pokémon capturados y tus Pokéballs disponibles 🎒🔥",
+        description="Muestra la imagen de tu equipo Pokémon y tus Pokéballs disponibles 🎒🔥",
     )
     async def equipo_command(interaction: discord.Interaction, usuario: Optional[discord.Member] = None):
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "Este comando solo funciona dentro del servidor **SNAP!** 🔥",
-                ephemeral=True,
-            )
-            return
-
-        target = usuario or interaction.user
-        team = get_pokemon_team(interaction.guild.id, target.id)
-        pokeballs = get_pokeballs(interaction.guild.id, target.id)
-        level, _, _ = get_user_stats(interaction.guild.id, target.id)
-
-        embed = discord.Embed(
-            title=f"🎒 Equipo Pokémon de {target.display_name} 🔥",
-            description=f"⭐ **Nivel:** {level} | 🎱 **Pokéballs:** {pokeballs} | 🧩 **Equipo:** {len(team)}/6",
-            color=discord.Color.orange(),
-        )
-
-        if not team:
-            embed.add_field(
-                name="Sin Pokémon todavía",
-                value=f"¡Subí de nivel para conseguir Pokéballs y usá `/catch` en **{CATCH_CHANNEL_NAME}**!",
-                inline=False,
-            )
-        else:
-            lines = []
-            for idx, mon in enumerate(team, start=1):
-                cfg = RARITY_CONFIG.get(mon["rarity"], {"emoji": "⚪"})
-                shiny_tag = "✨ " if mon["is_shiny"] else ""
-                lines.append(
-                    f"`#{idx}` {cfg['emoji']} **{shiny_tag}{mon['name']}** — *{mon['rarity']}* ({mon['ptype']})"
-                )
-            embed.add_field(name="🐾 Compañeros", value="\n".join(lines), inline=False)
-            embed.set_thumbnail(url=get_artwork_url(team[0]["pokedex_id"], team[0]["is_shiny"]))
-
-        embed.set_footer(text="Victini Bot • Mascota oficial de SNAP! 🔥✌️")
-        await interaction.response.send_message(embed=embed)
+        await _send_team_card(interaction, usuario)
