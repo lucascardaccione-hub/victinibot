@@ -313,6 +313,76 @@ def build_team_card_png(
     return out.getvalue()
 
 
+def build_welcome_card_png(
+    username: str,
+    member_count: int,
+    avatar_bytes: Optional[bytes] = None,
+) -> bytes:
+    """
+    Genera la imagen PNG de bienvenida para nuevos miembros de SNAP! (880x320)
+    con la foto de perfil del usuario, su username y el artwork de Victini.
+    """
+    W, H = 880, 320
+    img = Image.new("RGBA", (W, H), (16, 17, 36, 255))
+    draw = ImageDraw.Draw(img)
+
+    # Fondo degradado oscuro con tono fuego SNAP!
+    for y in range(H):
+        r = int(15 + (y / H) * 20)
+        g = int(16 + (y / H) * 10)
+        b = int(34 + (y / H) * 22)
+        draw.line([(0, y), (W, y)], fill=(r, g, b, 255))
+
+    # Marco exterior naranja Victini + tarjeta interior
+    draw.rounded_rectangle([10, 10, W - 11, H - 11], radius=22, outline=(255, 107, 53, 230), width=3)
+    draw.rounded_rectangle([24, 24, W - 24, H - 24], radius=16, fill=(26, 28, 54, 220), outline=(255, 159, 28, 90), width=2)
+
+    # Descargar artwork oficial de Victini (#494)
+    victini_bytes = _fetch_image_bytes(get_artwork_url(494, is_shiny=False))
+
+    # Avatar circular del usuario a la izquierda
+    av_x, av_y, av_size = 54, 86, 148
+    if avatar_bytes:
+        try:
+            av = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA").resize((av_size, av_size), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (av_size, av_size), 0)
+            ImageDraw.Draw(mask).ellipse([0, 0, av_size, av_size], fill=255)
+            img.paste(av, (av_x, av_y), mask)
+        except Exception:
+            draw.ellipse([av_x, av_y, av_x + av_size, av_y + av_size], fill=(255, 107, 53, 255))
+    else:
+        draw.ellipse([av_x, av_y, av_x + av_size, av_y + av_size], fill=(255, 107, 53, 255))
+    draw.ellipse([av_x - 3, av_y - 3, av_x + av_size + 3, av_y + av_size + 3], outline=(255, 159, 28, 255), width=4)
+
+    # Textos centrales
+    f_tag = _load_font(22, bold=True)
+    f_user = _load_font(36, bold=True)
+    f_sub = _load_font(18, bold=False)
+
+    clean_user = _clean_text_for_card(username) or "Nuevo Miembro"
+    if len(clean_user) > 18:
+        clean_user = clean_user[:17] + "..."
+
+    draw.text((232, 84), "BIENVENIDO/A A SNAP!", font=f_tag, fill=(255, 159, 28, 255))
+    draw.text((232, 124), clean_user, font=f_user, fill=(255, 255, 255, 255))
+    draw.text((232, 182), f"Miembro #{member_count}  |  Vigilado por Victini", font=f_sub, fill=(195, 200, 225, 255))
+
+    # Artwork oficial de Victini a la derecha
+    if victini_bytes:
+        try:
+            vic = Image.open(io.BytesIO(victini_bytes)).convert("RGBA")
+            vic.thumbnail((190, 190), Image.Resampling.LANCZOS)
+            vx = W - 44 - vic.width
+            vy = (H - vic.height) // 2
+            img.paste(vic, (vx, vy), vic)
+        except Exception:
+            pass
+
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
 class ReplacePokemonView(discord.ui.View):
     """Permite elegir exactamente qué Pokémon del equipo (6/6) liberar para hacer lugar al nuevo."""
 
