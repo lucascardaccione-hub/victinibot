@@ -24,7 +24,7 @@ def health():
 
 @app.route("/api/leaderboard")
 def api_leaderboard():
-    return jsonify(get_global_web_leaderboard(limit=25))
+    return jsonify(get_global_web_leaderboard(limit=50))
 
 
 @app.route("/")
@@ -65,7 +65,7 @@ def home():
                 margin-bottom: 20px;
             }
             .container {
-                width: 680px;
+                width: 920px;
                 max-width: 100%;
                 margin: 0 auto;
             }
@@ -197,21 +197,37 @@ def home():
                         return;
                     }
                     const medals = {1: '🥇', 2: '🥈', 3: '🥉'};
-                    let html = '<table><thead><tr><th>Pos</th><th>Usuario</th><th>Nivel</th><th>Experiencia</th></tr></thead><tbody>';
+                    let html = '<div style="overflow-x:auto;"><table><thead><tr><th>Pos</th><th>Usuario</th><th>Nivel</th><th>Experiencia</th><th>Pokéballs</th><th>Equipo Pokémon</th></tr></thead><tbody>';
                     for (const row of data) {
                         const pos = medals[row.rank] || ('#' + row.rank);
                         const pct = Math.min(100, Math.round((row.xp / row.next_xp) * 100));
+                        let teamHtml = '<span style="color:#666; font-size:12px;">Sin Pokémon</span>';
+                        if (row.team && row.team.length) {
+                            teamHtml = '<div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">';
+                            for (const mon of row.team) {
+                                const shinyPath = mon.is_shiny ? 'shiny/' : '';
+                                const imgUrl = `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${shinyPath}${mon.pokedex_id}.png`;
+                                const badgeTitle = `${mon.is_shiny ? '✨ ' : ''}${mon.name} (${mon.rarity})`;
+                                teamHtml += `<div title="${badgeTitle}" style="display:inline-flex; align-items:center; gap:4px; background:#101225; border:1px solid rgba(255,159,28,0.35); border-radius:999px; padding:2px 8px 2px 4px; font-size:12px;">
+                                    <img src="${imgUrl}" alt="${mon.name}" style="width:24px; height:24px; object-fit:contain;">
+                                    <span>${mon.is_shiny ? '✨' : ''}${mon.name}</span>
+                                </div>`;
+                            }
+                            teamHtml += '</div>';
+                        }
                         html += `<tr>
                             <td><b>${pos}</b></td>
-                            <td>${row.username}</td>
+                            <td><b>${row.username}</b></td>
                             <td><b style="color:#ff9f1c;">Nv. ${row.level}</b></td>
                             <td>
                                 <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
                                 <span style="font-size:12px; color:#ccc;">${row.xp}/${row.next_xp} XP</span>
                             </td>
+                            <td><span style="font-weight:bold; color:#ff6b35;">🎱 ${row.pokeballs ?? 0}</span></td>
+                            <td>${teamHtml}</td>
                         </tr>`;
                     }
-                    html += '</tbody></table>';
+                    html += '</tbody></table></div>';
                     container.innerHTML = html;
                 } catch (err) {
                     container.innerHTML = '<p style="color:#e71d36;">No se pudo cargar el ranking.</p>';
