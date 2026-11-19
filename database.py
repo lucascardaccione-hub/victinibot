@@ -20,6 +20,8 @@ def _get_conn():
         if use_ssl:
             import ssl
             ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
         return pg8000.dbapi.connect(
             user=urllib.parse.unquote(parsed.username or ""),
             password=urllib.parse.unquote(parsed.password or ""),
