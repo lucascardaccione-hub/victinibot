@@ -273,8 +273,8 @@ async def notify_level_up(guild: discord.Guild, member: discord.Member, new_leve
     if level_channel is not None:
         pokeballs = get_pokeballs(guild.id, member.id)
         level_up_msg = (
-            f"{member.mention} ha subido al nivel {new_level}. "
-            f"Espero que haya sido de forma legal 👀 o mis llamas actuarán rápidamente con severas consecuencias 🔥😈\n"
+            f"{member.mention} ha subido al **nivel {new_level}**. "
+            f"*Espero que haya sido de forma legal* 👀 o **mis llamas actuarán rápidamente con severas consecuencias** 🔥😈\n"
             f"🎱 ¡Recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** para usar en `/catch`)*"
         )
         await level_channel.send(level_up_msg)
@@ -285,13 +285,16 @@ async def notify_level_up(guild: discord.Guild, member: discord.Member, new_leve
         )
 
 
+WEB_PORTAL_URL = os.getenv("RENDER_EXTERNAL_URL", "https://victini.onrender.com").rstrip("/")
+
+
 def build_ranking_embed(
     guild: discord.Guild,
     page: int,
     per_page: int = 10,
 ) -> tuple[discord.Embed, int]:
     """
-    Construye el Embed con la tabla de posiciones para la página indicada (page es 0-indexed).
+    Construye el Embed estilizado con negrita/cursiva y enlace a la tabla web de SNAP!
     Retorna (embed, total_users).
     """
     offset = page * per_page
@@ -299,11 +302,17 @@ def build_ranking_embed(
 
     title = "🏆 Ranking de Niveles - SNAP! 🔥"
     if page == 0:
-        subtitle = "Top 10 de la comunidad vigilados por **Victini Bot** 👀🔥"
+        subtitle = (
+            "Top 10 de la comunidad en **SNAP!** 🔥\n"
+            f"🌐 *[Ver tabla completa, puntos y Pokémon en la Web]({WEB_PORTAL_URL})*"
+        )
     else:
         start_pos = offset + 1
         end_pos = min(offset + per_page, total_users)
-        subtitle = f"Posiciones #{start_pos} a #{end_pos} de la comunidad **SNAP!** 🔥"
+        subtitle = (
+            f"Posiciones **#{start_pos}** a **#{end_pos}** de la comunidad **SNAP!** 🔥\n"
+            f"🌐 *[Ver tabla completa, puntos y Pokémon en la Web]({WEB_PORTAL_URL})*"
+        )
 
     embed = discord.Embed(
         title=title,
@@ -313,33 +322,28 @@ def build_ranking_embed(
 
     if not rows:
         embed.add_field(
-            name="Sin datos aún",
-            value="Todavía no hay miembros con experiencia registrada. ¡Empiecen a charlar!",
+            name="📊 Tabla de Posiciones",
+            value="*Todavía no hay miembros con experiencia registrada. ¡Empiecen a charlar!* 🔥",
             inline=False,
         )
         return embed, total_users
 
-    table_lines = [
-        f"{'POS':<4} | {'USUARIO':<18} | {'NIVEL':<5} | {'EXPERIENCIA'}",
-        "-" * 48,
-    ]
-
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    lines = []
 
     for idx, (user_id, stored_username, level, xp) in enumerate(rows, start=offset + 1):
         member = guild.get_member(user_id)
         display_name = member.display_name if member else (stored_username or f"ID:{user_id}")
-        if len(display_name) > 16:
-            display_name = display_name[:15] + "…"
+        if len(display_name) > 22:
+            display_name = display_name[:21] + "…"
 
-        pos_str = medals.get(idx, f"#{idx}")
+        pos_str = medals.get(idx, f"**#{idx}**")
         next_xp = xp_for_next_level(level)
-        table_lines.append(
-            f"{pos_str:<4} | {display_name:<18} | Nv.{level:<2} | {xp}/{next_xp} XP"
+        lines.append(
+            f"{pos_str} **{display_name}** — **Nivel {level}** *(`{xp}/{next_xp}` XP)*"
         )
 
-    table_block = "```\n" + "\n".join(table_lines) + "\n```"
-    embed.add_field(name="📊 Tabla de Posiciones", value=table_block, inline=False)
+    embed.add_field(name="📊 Tabla de Posiciones", value="\n".join(lines), inline=False)
 
     total_pages = max(1, (total_users + per_page - 1) // per_page)
     embed.set_footer(
@@ -349,7 +353,7 @@ def build_ranking_embed(
 
 
 class RankingPaginationView(discord.ui.View):
-    """Vista interactiva con botón 'Ver más...' y 'Anterior' para explorar el ranking."""
+    """Vista interactiva con botón 'Ver más...', 'Anterior' y enlace a la Web de Victini."""
 
     def __init__(self, guild: discord.Guild, author_id: int, page: int = 0, per_page: int = 10):
         super().__init__(timeout=180)
@@ -357,6 +361,13 @@ class RankingPaginationView(discord.ui.View):
         self.author_id = author_id
         self.page = page
         self.per_page = per_page
+        self.add_item(
+            discord.ui.Button(
+                label="🌐 Ver tabla y Pokémon",
+                style=discord.ButtonStyle.link,
+                url=WEB_PORTAL_URL,
+            )
+        )
         self._update_buttons()
 
     def _update_buttons(self) -> None:
@@ -481,8 +492,8 @@ async def on_member_join(member: discord.Member):
         return
 
     welcome_msg = (
-        f"Bienvenido {member.mention}, acá vas a poder hacer muchas cosas y conocer gente muy copada, "
-        f"pero no te pases de vivo/a porque estoy viendo todo"
+        f"🔥 **Bienvenido/a {member.mention}**, acá vas a poder hacer *muchas cosas* y conocer gente **muy copada**, "
+        f"pero **no te pases de vivo/a** porque *estoy viendo todo* 👀"
     )
 
     avatar_bytes: Optional[bytes] = None
