@@ -1,3 +1,5 @@
+import asyncio
+import io
 import os
 import sys
 import time
@@ -10,7 +12,7 @@ from typing import Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from database import (
@@ -19,6 +21,8 @@ from database import (
     get_user_stats,
     get_leaderboard,
     xp_for_next_level,
+    export_guild_levels,
+    import_guild_levels,
 )
 from music import setup_music_commands
 
@@ -33,14 +37,19 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 WELCOME_CHANNEL_NAME = "🫂𝑩𝑰𝑬𝑵𝑽𝑬𝑵𝑰𝑫𝑰𝑻𝑻𝑶𝑺"
 LEVEL_CHANNEL_NAME = "🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀"
 UPDATES_CHANNEL_NAME = "🔥𝑽𝑰𝑪𝑻𝑰𝑵𝑰-𝑼𝑷𝑫𝑨𝑻𝑬𝑺🔥"
+BACKUP_CHANNEL_NAME = "victini-db-backup"
 
 # Zona horaria de Argentina (UTC-3)
 ARG_TZ = timezone(timedelta(hours=-3))
 
-# Configuración de experiencia por mensaje
+# Configuración de experiencia por mensaje de texto y por minuto activo en voz
 XP_MIN = 15
 XP_MAX = 25
-XP_COOLDOWN_SECONDS = 45  # Tiempo mínimo entre mensajes que otorgan XP
+XP_COOLDOWN_SECONDS = 45  # Cooldown anti-spam en canales de texto
+
+VOICE_XP_MIN = 10
+VOICE_XP_MAX = 15
+BACKUP_THROTTLE_SECONDS = 30.0
 
 
 def get_latest_commit_time_str() -> str:
@@ -60,7 +69,7 @@ def get_latest_commit_time_str() -> str:
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            iso_date = data["commit"]["committer"]["date"]  # Ej: "2026-11-18T22:36:00Z"
+            iso_date = data["commit"]["committer"]["date"]
             dt_utc = datetime.fromisoformat(iso_date.replace("Z", "+00:00"))
             dt_arg = dt_utc.astimezone(ARG_TZ)
             return dt_arg.strftime("%d/%m/%Y %H:%M:%S (Hora ARG)")
@@ -115,6 +124,135 @@ def is_snap_level_channel(channel: Optional[discord.abc.GuildChannel]) -> bool:
     if normalize_channel_name(channel.name) == normalize_channel_name(LEVEL_CHANNEL_NAME):
         return True
     return clean_alnum(channel.name) == clean_alnum(LEVEL_CHANNEL_NAME)
+
+
+# ==========================================
+# PERSISTENCIA EN LA NUBE (RESPALDO OCULTO EN DISCORD)
+# Evita que se pierdan los niveles cuando Render reinicia o hace deploy
+# ==========================================
+_backup_messages: dict[int, discord.Message] = {}
+_last_backup_ts: dict[int, float] = {}
+_backup_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_backup_lock(guild_id: int) -> asyncio.Lock:
+    if guild_id not in _backup_locks:
+        _backup_locks[guild_id] = asyncio.Lock()
+    return _backup_locks[guild_id]
+
+
+async def get_or_create_backup_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    """Obtiene o crea el canal privado oculto `victini-db-backup` (solo visible para Admins)."""
+    existing = discord.utils.get(guild.text_channels, name=BACKUP_CHANNEL_NAME)
+    if existing is not None:
+        return existing
+    try:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+            ),
+        }
+        channel = await guild.create_text_channel(
+            name=BACKUP_CHANNEL_NAME,
+            overwrites=overwrites,
+            reason="Canal oculto de respaldo automático para no perder niveles/XP de SNAP! al reiniciar Render",
+        )
+        print(f"💾 Canal oculto de respaldo '{BACKUP_CHANNEL_NAME}' creado en '{guild.name}'.", flush=True)
+        return channel
+    except Exception as e:
+        print(f"⚠️ No se pudo crear canal de respaldo en {guild.name}: {e}", flush=True)
+        return None
+
+
+async def restore_levels_from_discord(guild: discord.Guild) -> None:
+    """Restaura automáticamente la tabla de niveles desde el último respaldo en `victini-db-backup`."""
+    ch = discord.utils.get(guild.text_channels, name=BACKUP_CHANNEL_NAME)
+    if ch is None:
+        return
+
+    try:
+        async for msg in ch.history(limit=10):
+            if msg.author.id != guild.me.id:
+                continue
+            if msg.attachments:
+                for att in msg.attachments:
+                    if att.filename.endswith(".json"):
+                        raw = await att.read()
+                        records = json.loads(raw.decode("utf-8"))
+                        restored = import_guild_levels(guild.id, records)
+                        _backup_messages[guild.id] = msg
+                        print(
+                            f"♻️ Niveles restaurados en '{guild.name}': {restored} usuarios recuperados.",
+                            flush=True,
+                        )
+                        return
+    except Exception as e:
+        print(f"⚠️ Error restaurando respaldo en {guild.name}: {e}", flush=True)
+
+
+async def sync_levels_backup(guild: discord.Guild, force: bool = False) -> None:
+    """Guarda el JSON actualizado de niveles en el canal oculto `victini-db-backup`."""
+    now = time.time()
+    if not force and (now - _last_backup_ts.get(guild.id, 0.0) < BACKUP_THROTTLE_SECONDS):
+        return
+
+    async with _get_backup_lock(guild.id):
+        now = time.time()
+        if not force and (now - _last_backup_ts.get(guild.id, 0.0) < BACKUP_THROTTLE_SECONDS):
+            return
+
+        ch = await get_or_create_backup_channel(guild)
+        if ch is None:
+            return
+
+        records = export_guild_levels(guild.id)
+        if not records:
+            return
+
+        payload = json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        file_obj = discord.File(io.BytesIO(payload), filename="victini_levels_backup.json")
+        summary = f"💾 Respaldo automático SNAP! • {len(records)} usuarios • <t:{int(now)}:R>"
+
+        try:
+            msg = _backup_messages.get(guild.id)
+            if msg is not None:
+                await msg.edit(content=summary, attachments=[file_obj])
+            else:
+                # Buscar si ya existía un mensaje previo en el historial antes de crear uno nuevo
+                existing_msg = None
+                async for h_msg in ch.history(limit=5):
+                    if h_msg.author.id == guild.me.id and h_msg.attachments:
+                        existing_msg = h_msg
+                        break
+                if existing_msg is not None:
+                    await existing_msg.edit(content=summary, attachments=[file_obj])
+                    _backup_messages[guild.id] = existing_msg
+                else:
+                    new_msg = await ch.send(content=summary, file=file_obj)
+                    _backup_messages[guild.id] = new_msg
+            _last_backup_ts[guild.id] = time.time()
+        except Exception as e:
+            print(f"⚠️ Error guardando respaldo de niveles en {guild.name}: {e}", flush=True)
+
+
+async def notify_level_up(guild: discord.Guild, member: discord.Member, new_level: int) -> None:
+    """Envía el aviso oficial de subida de nivel únicamente por 🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀."""
+    level_channel = find_target_channel(guild, LEVEL_CHANNEL_NAME)
+    if level_channel is not None:
+        level_up_msg = (
+            f"{member.mention} ha subido al nivel {new_level}. "
+            f"Espero que haya sido de forma legal 👀 o mis llamas actuarán rápidamente con severas consecuencias 🔥😈"
+        )
+        await level_channel.send(level_up_msg)
+    else:
+        print(
+            f"⚠️ {member} subió a nivel {new_level}, pero no se encontró el canal '{LEVEL_CHANNEL_NAME}'.",
+            flush=True,
+        )
 
 
 def build_ranking_embed(
@@ -219,7 +357,7 @@ class VictiniBot(commands.Bot):
         intents = discord.Intents.default()
         intents.members = True          # Necesario para detectar nuevos miembros (on_member_join)
         intents.message_content = True  # Necesario para procesar mensajes y otorgar XP
-        intents.voice_states = True     # Necesario para conectarse y reproducir música en canales de voz
+        intents.voice_states = True     # Necesario para música y XP por tiempo activo en canales de voz
 
         super().__init__(command_prefix="!", intents=intents)
         self._boot_notified = False
@@ -235,8 +373,11 @@ class VictiniBot(commands.Bot):
             self._boot_notified = True
             commit_time_str = get_latest_commit_time_str()
 
-            # 1. Limpiar comandos duplicados a nivel guild para que no aparezcan dobles en Discord
             for guild in self.guilds:
+                # 1. Restaurar niveles y experiencia desde el canal oculto antes de nada
+                await restore_levels_from_discord(guild)
+
+                # 2. Limpiar comandos duplicados de servidor
                 try:
                     self.tree.clear_commands(guild=guild)
                     await self.tree.sync(guild=guild)
@@ -247,7 +388,7 @@ class VictiniBot(commands.Bot):
                 except Exception as e:
                     print(f"⚠️ Error limpiando comandos de guild en {guild.name}: {e}", flush=True)
 
-                # Enviar aviso de actualización al canal "🔥𝑽𝑰𝑪𝑻𝑰𝑵𝑰-𝑼𝑷𝑫𝑨𝑻𝑬𝑺🔥"
+                # 3. Enviar aviso de actualización al canal "🔥𝑽𝑰𝑪𝑻𝑰𝑵𝑰-𝑼𝑷𝑫𝑨𝑻𝑬𝑺🔥"
                 updates_channel = find_target_channel(guild, UPDATES_CHANNEL_NAME)
                 if updates_channel is not None:
                     update_msg = (
@@ -266,7 +407,7 @@ class VictiniBot(commands.Bot):
                         flush=True,
                     )
 
-            # 2. Sincronizar globalmente
+            # 4. Sincronizar comandos globales
             try:
                 await self.tree.sync()
                 print(
@@ -275,6 +416,10 @@ class VictiniBot(commands.Bot):
                 )
             except Exception as e:
                 print(f"⚠️ Error en sync global: {e}", flush=True)
+
+        # 5. Iniciar bucle de experiencia por tiempo activo en canales de voz (cada 60s)
+        if not voice_xp_loop.is_running():
+            voice_xp_loop.start()
 
         await self.change_presence(
             activity=discord.Activity(
@@ -311,38 +456,90 @@ async def on_member_join(member: discord.Member):
 
 
 # ==========================================
-# 2. SISTEMA DE NIVELES (XP POR MENSAJE)
+# 2A. SISTEMA DE NIVELES: MENSAJES EN CANALES DE TEXTO
 # ==========================================
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
         return
 
-    xp_gained = random.randint(XP_MIN, XP_MAX)
-    leveled_up, new_level, _ = add_xp(
-        guild_id=message.guild.id,
-        user_id=message.author.id,
-        amount=xp_gained,
-        now_ts=time.time(),
-        username=message.author.display_name,
-        cooldown=XP_COOLDOWN_SECONDS,
-    )
+    # Sumar XP únicamente por mensajes enviados en canales de texto (o hilos de canales de texto)
+    is_text_channel = isinstance(message.channel, (discord.TextChannel, discord.Thread))
+    if is_text_channel:
+        xp_gained = random.randint(XP_MIN, XP_MAX)
+        leveled_up, new_level, _, applied = add_xp(
+            guild_id=message.guild.id,
+            user_id=message.author.id,
+            amount=xp_gained,
+            now_ts=time.time(),
+            username=message.author.display_name,
+            cooldown=XP_COOLDOWN_SECONDS,
+            update_timestamp=True,
+        )
 
-    if leveled_up:
-        level_channel = find_target_channel(message.guild, LEVEL_CHANNEL_NAME)
-        if level_channel is not None:
-            level_up_msg = (
-                f"{message.author.mention} ha subido al nivel {new_level}. "
-                f"Espero que haya sido de forma legal 👀 o mis llamas actuarán rápidamente con severas consecuencias 🔥😈"
-            )
-            await level_channel.send(level_up_msg)
-        else:
-            print(
-                f"⚠️ {message.author} subió a nivel {new_level}, pero no se encontró el canal '{LEVEL_CHANNEL_NAME}'.",
-                flush=True,
-            )
+        if leveled_up and isinstance(message.author, discord.Member):
+            await notify_level_up(message.guild, message.author, new_level)
+
+        if applied:
+            asyncio.create_task(sync_levels_backup(message.guild, force=leveled_up))
 
     await bot.process_commands(message)
+
+
+# ==========================================
+# 2B. SISTEMA DE NIVELES: TIEMPO ACTIVO EN CANALES DE VOZ
+# (No suma si el usuario está muteado o ensordecido, aunque transmita pantalla)
+# ==========================================
+@tasks.loop(seconds=60)
+async def voice_xp_loop():
+    now_ts = time.time()
+    for guild in bot.guilds:
+        any_awarded = False
+        any_leveled = False
+
+        voice_channels = list(guild.voice_channels) + list(guild.stage_channels)
+        for vc in voice_channels:
+            # Ignorar canal AFK del servidor
+            if guild.afk_channel and vc.id == guild.afk_channel.id:
+                continue
+
+            for member in vc.members:
+                if member.bot:
+                    continue
+
+                vs = member.voice
+                if vs is None:
+                    continue
+
+                # Regla estricta: NO computar si está muteado o ensordecido (propio o del servidor),
+                # incluso si está transmitiendo pantalla (vs.self_stream)
+                if vs.self_mute or vs.mute or vs.self_deaf or vs.deaf:
+                    continue
+
+                xp_gained = random.randint(VOICE_XP_MIN, VOICE_XP_MAX)
+                leveled_up, new_level, _, applied = add_xp(
+                    guild_id=guild.id,
+                    user_id=member.id,
+                    amount=xp_gained,
+                    now_ts=now_ts,
+                    username=member.display_name,
+                    cooldown=0,
+                    update_timestamp=False,
+                )
+
+                if applied:
+                    any_awarded = True
+                if leveled_up:
+                    any_leveled = True
+                    await notify_level_up(guild, member, new_level)
+
+        if any_awarded:
+            await sync_levels_backup(guild, force=any_leveled)
+
+
+@voice_xp_loop.before_loop
+async def before_voice_xp_loop():
+    await bot.wait_until_ready()
 
 
 # ==========================================
