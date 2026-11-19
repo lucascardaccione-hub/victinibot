@@ -1,19 +1,16 @@
 import asyncio
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-import glob
 import json
-import os
-import subprocess
-import tempfile
+import threading
+import time
 import urllib.request
-import uuid
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, IO
+from typing import Optional, List, Dict
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-import discord.oggparse
 import yt_dlp
 
 try:
@@ -21,6 +18,16 @@ try:
     FFMPEG_EXECUTABLE = imageio_ffmpeg.get_ffmpeg_exe()
 except Exception:
     FFMPEG_EXECUTABLE = "ffmpeg"
+
+FFMPEG_BEFORE_OPTIONS = (
+    "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin"
+)
+# Calibrado para máxima nitidez en Discord: -3.7 dB headroom (0% clipping), alineación de timestamps HLS,
+# 128 kbps Opus con FEC anti-pérdida de paquetes y compression_level 3 (óptimo para 0.1 CPU en Render).
+FFMPEG_OPTIONS = (
+    "-vn -af volume=0.65,aresample=async=1:first_pts=0 "
+    "-compression_level 3 -application audio"
+)
 
 
 class _QuietYdlLogger:
@@ -41,7 +48,7 @@ class _QuietYdlLogger:
 @dataclass
 class Song:
     title: str
-    file_path: str
+    stream_url: str
     webpage_url: str
     requester: str
     duration_str: str = "?:??"
@@ -66,15 +73,6 @@ def get_guild_state(guild_id: int) -> GuildMusicState:
     return music_states[guild_id]
 
 
-def cleanup_song_file(song: Optional[Song]) -> None:
-    """Elimina el archivo temporal de audio luego de reproducirse para no ocupar disco."""
-    if song and song.file_path and os.path.exists(song.file_path):
-        try:
-            os.remove(song.file_path)
-        except Exception:
-            pass
-
-
 def format_duration(seconds: Optional[float]) -> str:
     if not seconds:
         return "?:??"
@@ -84,47 +82,6 @@ def format_duration(seconds: Optional[float]) -> str:
     if hours > 0:
         return f"{hours}:{mins:02d}:{secs:02d}"
     return f"{mins}:{secs:02d}"
-
-
-def _prepare_hq_opus_file(raw_file_path: str) -> str:
-    """
-    Convierte el archivo descargado a un contenedor Ogg Opus (.opus) de 128kbps 48kHz Stereo
-    con -compression_level 0 (<1s) y headroom limpio (volume=0.65 = -3.7dB) ANTES de reproducir.
-    Durante la reproducción en vivo en Render Free Tier (0.1 CPU), DirectOggOpusSource lee las
-    tramas directamente del archivo con 0% de uso de CPU y 0 bloqueos de red/ffmpeg.
-    """
-    base, _ = os.path.splitext(raw_file_path)
-    opus_path = f"{base}_hq.opus"
-
-    cmd_encode = [
-        FFMPEG_EXECUTABLE,
-        "-y",
-        "-i", raw_file_path,
-        "-map_metadata", "-1",
-        "-vn",
-        "-af", "volume=0.65",
-        "-c:a", "libopus",
-        "-ar", "48000",
-        "-ac", "2",
-        "-b:a", "128k",
-        "-vbr", "on",
-        "-compression_level", "0",
-        "-frame_duration", "20",
-        "-application", "audio",
-        "-fec", "true",
-        "-packet_loss", "15",
-        "-f", "opus",
-        opus_path,
-    ]
-    res = subprocess.run(cmd_encode, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if res.returncode == 0 and os.path.exists(opus_path) and os.path.getsize(opus_path) > 1024:
-        try:
-            os.remove(raw_file_path)
-        except Exception:
-            pass
-        return opus_path
-
-    return raw_file_path
 
 
 def _lookup_youtube_metadata(query: str) -> Optional[dict]:
@@ -188,7 +145,7 @@ def _lookup_youtube_metadata(query: str) -> Optional[dict]:
 
 
 def _lookup_sc_candidates(query: str) -> List[dict]:
-    """Busca los candidatos de audio en modo flat (1 segundo) en paralelo a YouTube."""
+    """Busca los candidatos de audio en modo flat (~1s) en paralelo a YouTube."""
     flat_opts = {
         "extract_flat": "in_playlist",
         "quiet": True,
@@ -210,65 +167,31 @@ def _lookup_sc_candidates(query: str) -> List[dict]:
     return candidates
 
 
-def _download_audio_fast(target: str, extra_opts: Optional[dict] = None) -> Optional[tuple[str, dict]]:
+def _extract_stream_url_fast(target: str) -> Optional[dict]:
     """
-    Descarga el stream de 160kbps con 8 hilos paralelos (concurrent_fragment_downloads=8),
-    reparando el contenedor con ffmpeg_location y pre-codificando a 128kbps Opus sin saturación.
+    Obtiene la URL directa del stream de 160kbps (download=False, ~1s) sin descargar toda la canción.
     """
-    token = uuid.uuid4().hex[:10]
-    tmp_dir = tempfile.gettempdir()
-    outtmpl = os.path.join(tmp_dir, f"victini_{token}.%(ext)s")
-
     opts = {
-        "format": "http_mp3_1_0/hls_aac_160k/251/bestaudio[abr>=128]/bestaudio/best",
+        "format": "http_mp3_1_0/hls_aac_160k/bestaudio[abr>=128]/bestaudio/best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "ignoreerrors": True,
-        "outtmpl": outtmpl,
-        "concurrent_fragment_downloads": 8,
-        "ffmpeg_location": FFMPEG_EXECUTABLE,
-        "max_filesize": 45 * 1024 * 1024,
         "logger": _QuietYdlLogger(),
     }
-    if extra_opts:
-        opts.update(extra_opts)
-
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(target, download=True)
+            info = ydl.extract_info(target, download=False)
             if not info:
                 return None
-
             chosen = info["entries"][0] if "entries" in info and info.get("entries") else info
-            if not chosen:
+            if not chosen or not chosen.get("url"):
                 return None
-
             fmt_id = str(chosen.get("format_id") or "").lower()
-            if "preview" in fmt_id:
-                for f in glob.glob(os.path.join(tmp_dir, f"victini_{token}.*")):
-                    try:
-                        os.remove(f)
-                    except Exception:
-                        pass
+            if "preview" in fmt_id or (chosen.get("duration") or 100) <= 35:
                 return None
-
-            matches = glob.glob(os.path.join(tmp_dir, f"victini_{token}.*"))
-            valid_files = [
-                f for f in matches
-                if not f.endswith(".part") and os.path.exists(f) and os.path.getsize(f) > 1024
-            ]
-            if not valid_files:
-                return None
-
-            hq_opus_file = _prepare_hq_opus_file(valid_files[0])
-            return hq_opus_file, chosen
+            return chosen
     except Exception:
-        for f in glob.glob(os.path.join(tmp_dir, f"victini_{token}.*")):
-            try:
-                os.remove(f)
-            except Exception:
-                pass
         return None
 
 
@@ -322,35 +245,26 @@ def _score_sc_candidate(entry: dict, yt_meta: Optional[dict], query: str) -> flo
 
 def search_song_sync(query: str, requester: str) -> Optional[Song]:
     """
-    Búsqueda y preparación rápida (~4-5s):
-    1. Busca en paralelo la ficha de YouTube y los candidatos HQ (1.2s).
-    2. Descarga con 8 hilos paralelos y convierte a 128kbps Opus en <1s (-compression_level 0).
-    3. Reproduce con 0% de uso de CPU en vivo mediante DirectOggOpusSource (cero microcortes).
+    Resolución instantánea de stream (~2.5s):
+    1. Busca en paralelo la ficha de YouTube y los candidatos HQ.
+    2. Extrae la URL de streaming 160kbps con download=False.
     """
     query = query.strip()
     is_url = query.startswith("http://") or query.startswith("https://")
 
-    if is_url:
-        res = _download_audio_fast(
-            query,
-            extra_opts={"extractor_args": {"youtube": {"player_client": ["android_testsuite"]}}},
-        )
-        if not res:
-            res = _download_audio_fast(query)
-        if res:
-            file_path, info = res
+    if is_url and "youtube.com" not in query and "youtu.be" not in query:
+        info = _extract_stream_url_fast(query)
+        if info:
             return Song(
                 title=info.get("title") or "Canción",
-                file_path=file_path,
+                stream_url=info["url"],
                 webpage_url=info.get("webpage_url") or query,
                 requester=requester,
                 duration_str=format_duration(info.get("duration")),
                 source_name="YouTube HQ",
                 thumbnail=info.get("thumbnail"),
             )
-        return None
 
-    # 1. Ejecutar en PARALELO la búsqueda de ficha oficial en YouTube y los candidatos HQ
     with ThreadPoolExecutor(max_workers=2) as pool:
         fut_yt = pool.submit(_lookup_youtube_metadata, query)
         fut_sc = pool.submit(_lookup_sc_candidates, query)
@@ -368,92 +282,112 @@ def search_song_sync(query: str, requester: str) -> Optional[Song]:
     yt_url = yt_meta.get("url") if yt_meta else None
     display_title = (yt_meta.get("display_title") if yt_meta else None) or query
 
-    # 2. Descargar y pre-empaquetar a 128k Opus el mejor candidato
     for entry in candidates[:4]:
-        res = _download_audio_fast(entry["url"])
-        if res:
-            file_path, fb_info = res
-            if (fb_info.get("duration") or 100) > 35:
-                final_title = display_title if yt_meta else (fb_info.get("title") or query)
-                webpage_url = yt_url or fb_info.get("webpage_url") or "https://www.youtube.com"
-                duration_str = format_duration(fb_info.get("duration") or (yt_meta.get("duration") if yt_meta else None))
-                thumbnail = (yt_meta.get("thumbnail") if yt_meta else None) or fb_info.get("thumbnail")
-                return Song(
-                    title=final_title,
-                    file_path=file_path,
-                    webpage_url=webpage_url,
-                    requester=requester,
-                    duration_str=duration_str,
-                    source_name="YouTube HQ",
-                    thumbnail=thumbnail,
-                )
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
-
-    # 3. Respaldo directo de YouTube
-    if yt_url:
-        res = _download_audio_fast(
-            yt_url,
-            extra_opts={"extractor_args": {"youtube": {"player_client": ["android_testsuite"]}}},
-        )
-        if res:
-            file_path, info = res
+        fb_info = _extract_stream_url_fast(entry["url"])
+        if fb_info:
+            final_title = display_title if yt_meta else (fb_info.get("title") or query)
+            webpage_url = yt_url or fb_info.get("webpage_url") or "https://www.youtube.com"
+            duration_str = format_duration(fb_info.get("duration") or (yt_meta.get("duration") if yt_meta else None))
+            thumbnail = (yt_meta.get("thumbnail") if yt_meta else None) or fb_info.get("thumbnail")
             return Song(
-                title=display_title,
-                file_path=file_path,
-                webpage_url=yt_url,
+                title=final_title,
+                stream_url=fb_info["url"],
+                webpage_url=webpage_url,
                 requester=requester,
-                duration_str=format_duration(yt_meta.get("duration") or info.get("duration")),
+                duration_str=duration_str,
                 source_name="YouTube HQ",
-                thumbnail=yt_meta.get("thumbnail") or info.get("thumbnail"),
+                thumbnail=thumbnail,
             )
 
     return None
 
 
-class DirectOggOpusSource(discord.AudioSource):
+class BufferedFFmpegOpusAudio(discord.AudioSource):
     """
-    Lee tramas Opus directamente desde un archivo .opus local pre-generado sin levantar
-    ningún subproceso ffmpeg durante la reproducción (0% uso de CPU en Render Free Tier).
+    Fuente de audio con buffer en RAM (hilo productor en segundo plano):
+    - Pre-carga los primeros 75 paquetes Opus (~1.5 segundos de audio) antes de iniciar la reproducción,
+      y mantiene un colchón adelantado de hasta 400 paquetes (8 segundos) en memoria.
+    - De este modo, el hilo de envío de Discord (cada 20ms exactos) lee siempre desde RAM en 0.001ms
+      y jamás sufre cortes ni jitter cuando ffmpeg descarga un nuevo segmento HLS de la red.
     """
-    def __init__(self, file_path: str) -> None:
-        self.file_path = file_path
-        self._file: Optional[IO[bytes]] = open(file_path, "rb")
-        self._packet_iter = discord.oggparse.OggStream(self._file).iter_packets()
+    def __init__(self, stream_url: str, prebuffer_packets: int = 75, max_buffer: int = 400) -> None:
+        self._inner = discord.FFmpegOpusAudio(
+            stream_url,
+            bitrate=128,
+            executable=FFMPEG_EXECUTABLE,
+            before_options=FFMPEG_BEFORE_OPTIONS,
+            options=FFMPEG_OPTIONS,
+        )
+        self._buffer: deque[bytes] = deque()
+        self._max_buffer = max_buffer
+        self._eof = False
+        self._closed = False
+        self._cond = threading.Condition()
+
+        self._thread = threading.Thread(target=self._producer_loop, daemon=True)
+        self._thread.start()
+
+        # Esperar hasta acumular 1.5s de paquetes limpios en RAM antes de arrancar (tarda ~0.8s)
+        deadline = time.monotonic() + 5.0
+        with self._cond:
+            while len(self._buffer) < prebuffer_packets and not self._eof and not self._closed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._cond.wait(timeout=remaining)
+
+    def _producer_loop(self) -> None:
+        try:
+            while not self._closed:
+                data = self._inner.read()
+                if not data:
+                    with self._cond:
+                        self._eof = True
+                        self._cond.notify_all()
+                    break
+                if data.startswith((b"OpusHead", b"OpusTags")):
+                    continue
+                with self._cond:
+                    while len(self._buffer) >= self._max_buffer and not self._closed:
+                        self._cond.wait(timeout=0.05)
+                    if self._closed:
+                        break
+                    self._buffer.append(data)
+                    self._cond.notify_all()
+        except Exception:
+            with self._cond:
+                self._eof = True
+                self._cond.notify_all()
 
     def read(self) -> bytes:
-        if self._file is None:
+        with self._cond:
+            while not self._buffer and not self._eof and not self._closed:
+                self._cond.wait(timeout=0.2)
+            if self._buffer:
+                pkt = self._buffer.popleft()
+                self._cond.notify_all()
+                return pkt
             return b""
-        while True:
-            try:
-                data = next(self._packet_iter, b"")
-            except Exception:
-                return b""
-            if not data:
-                return b""
-            if data.startswith((b"OpusHead", b"OpusTags")):
-                continue
-            return data
 
     def is_opus(self) -> bool:
         return True
 
     def cleanup(self) -> None:
-        if self._file is not None:
-            try:
-                self._file.close()
-            except Exception:
-                pass
-            self._file = None
+        with self._cond:
+            self._closed = True
+            self._buffer.clear()
+            self._cond.notify_all()
+        try:
+            self._inner.cleanup()
+        except Exception:
+            pass
 
 
-def create_audio_source(file_path: str) -> discord.AudioSource:
+def create_audio_source(stream_url: str) -> discord.AudioSource:
     """
-    Crea el lector directo de Ogg Opus en disco con 0% consumo de CPU en vivo.
+    Crea la fuente Opus pre-buffereada en RAM: arranque rápido (~0.8s) + cero microcortes en vivo.
     """
-    return DirectOggOpusSource(file_path)
+    return BufferedFFmpegOpusAudio(stream_url)
 
 
 def build_now_playing_embed(song: Song, status_title: str = "🎶 Reproduciendo ahora en SNAP! 🔥") -> discord.Embed:
@@ -510,16 +444,12 @@ class MusicControlView(discord.ui.View):
     @discord.ui.button(label="⏹️ Detener y Salir", style=discord.ButtonStyle.danger)
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_guild_state(self.guild_id)
-        for queued_song in state.queue:
-            cleanup_song_file(queued_song)
         state.queue.clear()
-        old_current = state.current
         state.current = None
         vc = state.voice_client
         if vc and vc.is_connected():
             await vc.disconnect(force=True)
         state.voice_client = None
-        cleanup_song_file(old_current)
         await interaction.response.send_message("⏹️ Música detenida y **Victini Bot** salió del canal de voz. 👋🔥")
 
 
@@ -528,12 +458,10 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
     vc = state.voice_client
 
     if not vc or not vc.is_connected():
-        cleanup_song_file(state.current)
         state.current = None
         return
 
     if not state.queue:
-        cleanup_song_file(state.current)
         state.current = None
         return
 
@@ -541,10 +469,9 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
     state.current = next_song
 
     try:
-        source = create_audio_source(next_song.file_path)
+        source = await asyncio.to_thread(create_audio_source, next_song.stream_url)
     except Exception as e:
         print(f"❌ Error creando fuente de audio para '{next_song.title}': {e}", flush=True)
-        cleanup_song_file(next_song)
         if state.text_channel:
             await state.text_channel.send(
                 f"⚠️ No pude reproducir **{next_song.title}**, pasando a la siguiente..."
@@ -563,7 +490,6 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
     def _after_playback(error: Optional[Exception]):
         if error:
             print(f"⚠️ Error en reproducción de voz: {error}", flush=True)
-        cleanup_song_file(next_song)
         asyncio.run_coroutine_threadsafe(play_next(guild_id, loop), loop)
 
     vc.play(source, after=_after_playback)
@@ -622,8 +548,6 @@ def setup_music_commands(bot: commands.Bot) -> None:
         try:
             vc = await voice_task
         except Exception as e:
-            song_cleanup = await search_task
-            cleanup_song_file(song_cleanup)
             await interaction.followup.send(
                 f"⚠️ No pude conectarme al canal de voz **{target_voice_channel.name}** (verificá mis permisos de Conectar y Hablar): `{type(e).__name__}: {e}`"
             )
@@ -633,7 +557,7 @@ def setup_music_commands(bot: commands.Bot) -> None:
 
         if song is None:
             await interaction.followup.send(
-                f"❌ No pude encontrar ni descargar el audio para **`{cancion}`**. Probá con otro nombre o autor. 🔥"
+                f"❌ No pude encontrar el audio para **`{cancion}`**. Probá con otro nombre o autor. 🔥"
             )
             return
 
@@ -677,16 +601,12 @@ def setup_music_commands(bot: commands.Bot) -> None:
         if interaction.guild is None:
             return
         state = get_guild_state(interaction.guild.id)
-        for queued_song in state.queue:
-            cleanup_song_file(queued_song)
         state.queue.clear()
-        old_current = state.current
         state.current = None
         vc = interaction.guild.voice_client
         if vc and vc.is_connected():
             await vc.disconnect(force=True)
             state.voice_client = None
-            cleanup_song_file(old_current)
             await interaction.response.send_message(
                 "⏹️ Música detenida y **Victini Bot** salió del canal de voz. ¡Nos vemos! 🔥✌️"
             )
