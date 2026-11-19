@@ -23,7 +23,6 @@ def init_db() -> None:
             )
             """
         )
-        # Migración suave por si la tabla ya existía sin la columna username
         cursor.execute("PRAGMA table_info(user_levels)")
         columns = [col[1] for col in cursor.fetchall()]
         if "username" not in columns:
@@ -46,10 +45,11 @@ def add_xp(
     now_ts: float,
     username: str = "Miembro",
     cooldown: int = 45,
-) -> Tuple[bool, int, int]:
+    update_timestamp: bool = True,
+) -> Tuple[bool, int, int, bool]:
     """
-    Suma XP a un usuario respetando el cooldown anti-spam.
-    Retorna: (subio_de_nivel, nuevo_nivel, xp_actual)
+    Suma XP a un usuario respetando el cooldown anti-spam (cuando cooldown > 0).
+    Retorna: (subio_de_nivel, nuevo_nivel, xp_actual, xp_aplicada)
     """
     with closing(sqlite3.connect(DB_PATH)) as conn:
         cursor = conn.cursor()
@@ -71,9 +71,9 @@ def add_xp(
         else:
             xp, level, last_ts = row
 
-        # Verificar cooldown anti-spam
-        if now_ts - last_ts < cooldown:
-            return False, level, xp
+        # Verificar cooldown anti-spam (si cooldown > 0)
+        if cooldown > 0 and (now_ts - last_ts < cooldown):
+            return False, level, xp, False
 
         xp += amount
         leveled_up = False
@@ -83,16 +83,17 @@ def add_xp(
             level += 1
             leveled_up = True
 
+        new_ts = now_ts if update_timestamp else last_ts
         cursor.execute(
             """
             UPDATE user_levels
             SET username = ?, xp = ?, level = ?, last_xp_timestamp = ?
             WHERE guild_id = ? AND user_id = ?
             """,
-            (username, xp, level, now_ts, guild_id, user_id),
+            (username, xp, level, new_ts, guild_id, user_id),
         )
         conn.commit()
-        return leveled_up, level, xp
+        return leveled_up, level, xp, True
 
 
 def get_user_stats(guild_id: int, user_id: int) -> Tuple[int, int, Optional[int]]:
@@ -181,3 +182,66 @@ def get_global_web_leaderboard(limit: int = 25) -> List[dict]:
                 }
             )
         return result
+
+
+def export_guild_levels(guild_id: int) -> List[dict]:
+    """Exporta todos los niveles y experiencia del servidor para respaldo persistente."""
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT user_id, username, level, xp
+            FROM user_levels
+            WHERE guild_id = ?
+            ORDER BY level DESC, xp DESC
+            """,
+            (guild_id,),
+        )
+        return [
+            {"user_id": uid, "username": uname, "level": lvl, "xp": xp}
+            for uid, uname, lvl, xp in cursor.fetchall()
+        ]
+
+
+def import_guild_levels(guild_id: int, records: List[dict]) -> int:
+    """
+    Restaura los niveles y experiencia desde el respaldo sin sobreescribir datos más avanzados.
+    Retorna la cantidad de usuarios restaurados/actualizados.
+    """
+    if not records:
+        return 0
+    restored = 0
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        cursor = conn.cursor()
+        for rec in records:
+            uid = int(rec["user_id"])
+            uname = str(rec.get("username") or "Miembro")
+            lvl = int(rec.get("level") or 1)
+            xp = int(rec.get("xp") or 0)
+
+            cursor.execute(
+                "SELECT level, xp FROM user_levels WHERE guild_id = ? AND user_id = ?",
+                (guild_id, uid),
+            )
+            existing = cursor.fetchone()
+            if existing is None:
+                cursor.execute(
+                    """
+                    INSERT INTO user_levels (guild_id, user_id, username, xp, level, last_xp_timestamp)
+                    VALUES (?, ?, ?, ?, ?, 0)
+                    """,
+                    (guild_id, uid, uname, xp, lvl),
+                )
+                restored += 1
+            elif lvl > existing[0] or (lvl == existing[0] and xp > existing[1]):
+                cursor.execute(
+                    """
+                    UPDATE user_levels
+                    SET username = ?, level = ?, xp = ?
+                    WHERE guild_id = ? AND user_id = ?
+                    """,
+                    (uname, lvl, xp, guild_id, uid),
+                )
+                restored += 1
+        conn.commit()
+    return restored
