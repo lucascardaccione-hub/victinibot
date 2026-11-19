@@ -46,7 +46,7 @@ class Song:
     webpage_url: str
     requester: str
     duration_str: str = "?:??"
-    source_name: str = "YouTube"
+    source_name: str = "Audio HQ"
     thumbnail: Optional[str] = None
 
 
@@ -91,8 +91,9 @@ def _prepare_hq_opus_file(raw_file_path: str, acodec: Optional[str] = None) -> s
     """
     Convierte o remuxea el archivo descargado a un contenedor Ogg Opus (.opus) de alta fidelidad
     ANTES de iniciar la reproducción en Discord.
-    - Si ya es Opus nativo de YouTube (Format 251 .webm 160kbps 48kHz), copia las tramas sin pérdida (-c:a copy) en ~45ms.
-    - Si es AAC/M4A (itag=140 de YouTube), lo codifica a Opus 48kHz Stereo 160kbps VBR con máxima calidad (-compression_level 10 -application audio).
+    - Si ya es Opus nativo (Format 251 .webm 160kbps 48kHz), copia las tramas sin pérdida (-c:a copy).
+    - Si es AAC/MP3 (.m4a/.mp3), lo codifica a Opus 48kHz Stereo 160kbps VBR con máxima calidad
+      (-compression_level 10 -application audio) y normalización suave de volumen.
     De este modo, durante la reproducción en vivo en Render Free Tier (0.1 CPU) NO corre ningún subproceso ffmpeg,
     eliminando al 100% los microcortes, saturación y distorsión por límite de CPU.
     """
@@ -120,7 +121,7 @@ def _prepare_hq_opus_file(raw_file_path: str, acodec: Optional[str] = None) -> s
                 pass
             return opus_path
 
-    # Codificación HQ a Ogg Opus 48kHz Stereo 160kbps para el stream oficial AAC itag=140 de YouTube
+    # Codificación HQ a Ogg Opus 48kHz Stereo 160kbps antes de reproducir
     cmd_encode = [
         FFMPEG_EXECUTABLE,
         "-y",
@@ -149,30 +150,10 @@ def _prepare_hq_opus_file(raw_file_path: str, acodec: Optional[str] = None) -> s
     return raw_file_path
 
 
-def _get_invidious_api_hosts() -> List[str]:
-    hosts = ["https://yt.chocolatemoo53.com"]
-    try:
-        req = urllib.request.Request(
-            "https://api.invidious.io/instances.json?sort_by=health",
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            instances = json.loads(resp.read().decode("utf-8"))
-            for inst in instances:
-                info = inst[1]
-                if info.get("type") == "https" and info.get("api"):
-                    uri = info.get("uri", "").rstrip("/")
-                    if uri and uri not in hosts:
-                        hosts.append(uri)
-    except Exception:
-        pass
-    return hosts
-
-
 def _lookup_youtube_metadata(query: str) -> Optional[dict]:
     """
-    Busca en YouTube primero con yt-dlp (extract_flat + oEmbed) y tiene respaldo automático
-    en la API de búsqueda de Invidious (/api/v1/search) por si YouTube bloquea la búsqueda en Render.
+    Busca en YouTube con yt-dlp (extract_flat + oEmbed) para obtener título oficial,
+    canal/artista, duración y miniatura.
     """
     opts = {
         "extract_flat": "in_playlist",
@@ -226,126 +207,20 @@ def _lookup_youtube_metadata(query: str) -> Optional[dict]:
     except Exception:
         pass
 
-    # Respaldo de búsqueda en YouTube vía API de Invidious
-    ctx = ssl._create_unverified_context()
-    for host in _get_invidious_api_hosts()[:3]:
-        try:
-            s_url = f"{host}/api/v1/search?q={urllib.parse.quote(query)}&type=video"
-            req = urllib.request.Request(s_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
-                results = json.loads(resp.read().decode("utf-8"))
-                if not results:
-                    continue
-                first = results[0]
-                vid_id = first.get("videoId")
-                if not vid_id:
-                    continue
-                raw_title = (first.get("title") or "").strip()
-                channel = (first.get("author") or "").replace(" - Topic", "").replace("VEVO", "").strip()
-                if channel and channel.lower() not in raw_title.lower():
-                    display_title = f"{channel} - {raw_title}"
-                else:
-                    display_title = raw_title
-                return {
-                    "id": vid_id,
-                    "title": raw_title,
-                    "display_title": display_title,
-                    "channel": channel,
-                    "url": f"https://www.youtube.com/watch?v={vid_id}",
-                    "duration": first.get("lengthSeconds"),
-                    "thumbnail": f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg",
-                }
-        except Exception:
-            continue
-
-    return None
-
-
-def _download_youtube_via_companion_issuer(vid_id: str) -> Optional[str]:
-    """
-    Obtiene los adaptiveFormats firmados desde `/api/v1/videos/{vid_id}`, selecciona el stream
-    Format 251 (160kbps 48kHz Studio Opus .webm) o Format 140 (128kbps M4A), y descarga el archivo
-    directamente desde el nodo `issuer` exacto (`yt-compX`) que firmó el token `pot`.
-    Evita el error 403 de balanceo entre nodos y garantiza calidad de estudio 100% original de YouTube.
-    """
-    ctx = ssl._create_unverified_context()
-    tmp_dir = tempfile.gettempdir()
-
-    for host in _get_invidious_api_hosts()[:3]:
-        try:
-            v_url = f"{host}/api/v1/videos/{vid_id}"
-            req = urllib.request.Request(v_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=12, context=ctx) as resp:
-                v_data = json.loads(resp.read().decode("utf-8"))
-
-            af_map = {
-                str(af.get("itag")): af
-                for af in (v_data.get("adaptiveFormats") or [])
-                if af.get("url")
-            }
-
-            # Priorizar Format 251 (160kbps 48kHz Stereo Opus nativo), luego 250, 140, 249
-            for itag in ("251", "250", "140", "249"):
-                chosen_af = af_map.get(itag)
-                if not chosen_af:
-                    continue
-
-                raw_u = chosen_af["url"]
-                parsed = urllib.parse.urlparse(raw_u)
-                qs = urllib.parse.parse_qs(parsed.query)
-                issuer_list = qs.get("issuer")
-
-                if issuer_list and issuer_list[0]:
-                    issuer = issuer_list[0]
-                    proxied_u = f"https://{issuer}/videoplayback?{parsed.query}&host={parsed.netloc}"
-                else:
-                    proxied_u = f"{host}/latest_version?id={vid_id}&itag={itag}&local=true"
-
-                is_opus = itag in ("251", "250", "249") or "opus" in (chosen_af.get("type") or "").lower()
-                ext = ".webm" if is_opus else ".m4a"
-                token = uuid.uuid4().hex[:10]
-                raw_path = os.path.join(tmp_dir, f"victini_yt_{token}{ext}")
-
-                try:
-                    s_req = urllib.request.Request(proxied_u, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(s_req, timeout=25, context=ctx) as s_resp:
-                        with open(raw_path, "wb") as out_f:
-                            while True:
-                                chunk = s_resp.read(65536)
-                                if not chunk:
-                                    break
-                                out_f.write(chunk)
-
-                    if os.path.exists(raw_path) and os.path.getsize(raw_path) > 16384:
-                        hq_opus = _prepare_hq_opus_file(
-                            raw_path,
-                            acodec="opus" if is_opus else "aac",
-                        )
-                        return hq_opus
-                except Exception as e:
-                    print(f"⚠️ Error descargando itag {itag} desde {proxied_u[:60]}: {e}", flush=True)
-                finally:
-                    if os.path.exists(raw_path):
-                        try:
-                            os.remove(raw_path)
-                        except Exception:
-                            pass
-        except Exception as e:
-            print(f"⚠️ Error consultando API de video en {host} para {vid_id}: {e}", flush=True)
-
     return None
 
 
 def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -> Optional[tuple[str, dict]]:
     """
-    Respaldo con yt-dlp directo si el servidor tiene acceso residencial a YouTube.
+    Descarga el stream de mayor calidad de audio disponible (priorizando 160kbps Opus/AAC/MP3)
+    y lo pre-convierte a un archivo .opus listo para transmisión directa con 0% consumo de CPU en vivo.
     """
     token = uuid.uuid4().hex[:10]
     tmp_dir = tempfile.gettempdir()
     outtmpl = os.path.join(tmp_dir, f"victini_{token}.%(ext)s")
 
     opts = {
-        "format": "251/140/bestaudio[acodec=opus]/bestaudio[abr>=128]/bestaudio/best",
+        "format": "251/hls_aac_160k/http_mp3_1_0/bestaudio[acodec=opus]/bestaudio[abr>=128]/bestaudio/best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -367,6 +242,15 @@ def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -
             if not chosen:
                 return None
 
+            fmt_id = str(chosen.get("format_id") or "").lower()
+            if "preview" in fmt_id:
+                for f in glob.glob(os.path.join(tmp_dir, f"victini_{token}.*")):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+                return None
+
             matches = glob.glob(os.path.join(tmp_dir, f"victini_{token}.*"))
             valid_files = [
                 f for f in matches
@@ -386,48 +270,125 @@ def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -
         return None
 
 
-def _extract_youtube_id_from_url(url: str) -> Optional[str]:
-    """Extrae el video ID de 11 caracteres de una URL de YouTube."""
-    try:
-        parsed = urllib.parse.urlparse(url)
-        if "youtu.be" in parsed.netloc:
-            return parsed.path.strip("/").split("/")[0]
-        qs = urllib.parse.parse_qs(parsed.query)
-        if "v" in qs and qs["v"]:
-            return qs["v"][0]
-    except Exception:
-        pass
+def _score_sc_candidate(entry: dict, yt_meta: Optional[dict], query: str) -> float:
+    """
+    Puntúa cada resultado candidato dando máxima prioridad a que coincidan las palabras
+    de la búsqueda del usuario, el artista/canal oficial de YouTube y la duración.
+    """
+    score = 0.0
+    sc_title_only = (entry.get("title") or "").lower()
+    sc_uploader = (entry.get("uploader") or "").lower()
+    sc_full = f"{sc_title_only} {sc_uploader}"
+    sc_dur = entry.get("duration") or 0
+
+    # 1. Coincidencia con las palabras exactas que escribió el usuario (ej. 'duki rockstar', 'khea trapicheo')
+    query_words = [w for w in query.lower().split() if len(w) >= 2]
+    matched_q_words = sum(1 for w in query_words if w in sc_full)
+    if query_words and matched_q_words == len(query_words):
+        score += 180.0
+    else:
+        score += matched_q_words * 35.0
+
+    # 2. Coincidencia con los metadatos oficiales de YouTube (artista y duración)
+    if yt_meta:
+        yt_dur = yt_meta.get("duration") or 0
+        yt_channel = (yt_meta.get("channel") or "").lower()
+        yt_title = (yt_meta.get("title") or "").lower()
+
+        if yt_channel:
+            yt_ch_clean = "".join(c for c in yt_channel if c.isalnum())
+            sc_full_clean = "".join(c for c in sc_full if c.isalnum())
+            if yt_channel in sc_full or (len(yt_ch_clean) >= 3 and yt_ch_clean in sc_full_clean):
+                score += 120.0
+
+        if yt_title and yt_title in sc_title_only:
+            score += 70.0
+
+        if yt_dur > 0 and sc_dur > 0:
+            diff = abs(sc_dur - yt_dur)
+            if diff <= 5:
+                score += 60.0
+            elif diff <= 15:
+                score += 30.0
+            elif diff > 60:
+                score -= 50.0
+
+    # Penalizar remixes o versiones lentas/aceleradas si el usuario no las pidió
+    for bad_tag in ("slowed", "reverb", "nightcore", "8d audio", "karaoke"):
+        if bad_tag in sc_title_only and bad_tag not in query.lower():
+            score -= 80.0
+
+    return score
+
+
+def _download_hq_fallback(query: str, yt_meta: Optional[dict] = None) -> Optional[tuple[str, dict]]:
+    """
+    Busca la pista completa (sin DRM y > 35s), priorizando 160kbps AAC (hls_aac_160k) y coincidencia
+    exacta de artista + canción, y la pre-convierte a Ogg Opus 48kHz Stereo antes de reproducir.
+    """
+    queries_to_try = [query]
+    if yt_meta and yt_meta.get("channel") and yt_meta.get("title"):
+        ch = yt_meta["channel"]
+        ti = yt_meta["title"]
+        enriched = f"{ch} {ti}" if ch.lower() not in ti.lower() else ti
+        if enriched.lower() != query.lower():
+            queries_to_try.append(enriched)
+
+    flat_opts = {
+        "extract_flat": "in_playlist",
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": True,
+        "logger": _QuietYdlLogger(),
+    }
+
+    seen_urls = set()
+    candidates = []
+
+    for q in queries_to_try:
+        try:
+            with yt_dlp.YoutubeDL(flat_opts) as ydl:
+                info = ydl.extract_info(f"scsearch10:{q}", download=False)
+                for e in ((info or {}).get("entries") or []):
+                    if e and e.get("url") and e["url"] not in seen_urls:
+                        dur = e.get("duration") or 0
+                        if dur == 0 or dur > 35:
+                            seen_urls.add(e["url"])
+                            candidates.append(e)
+        except Exception:
+            pass
+
+    candidates.sort(key=lambda e: _score_sc_candidate(e, yt_meta, query), reverse=True)
+
+    for entry in candidates[:6]:
+        res = _download_audio_with_ytdlp(entry["url"])
+        if res:
+            file_path, track_info = res
+            if (track_info.get("duration") or 100) > 35:
+                return file_path, track_info
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+
     return None
 
 
 def search_song_sync(query: str, requester: str) -> Optional[Song]:
     """
-    Busca la canción en YouTube y descarga SIEMPRE el stream Format 251 (160kbps 48kHz Studio Opus)
-    original de YouTube:
-    1. Primero usa el proxy firmado por `issuer` (`_download_youtube_via_companion_issuer`), que funciona
-       al 100% en IPs de Render sin bloqueo anti-bot de YouTube y copia el stream Opus nativo sin pérdida.
-    2. Si el proxy no estuviera disponible, intenta descarga directa con yt-dlp.
+    Motor híbrido de alta fidelidad:
+    1. Obtiene la ficha oficial en YouTube (Título, Artista, Duración y Portada).
+    2. Intenta descarga directa de YouTube Format 251 (160kbps 48kHz Stereo Opus).
+    3. Si YouTube bloquea la IP de Render, descarga automáticamente el stream equivalente en 160kbps
+       verificando artista + título y lo pre-empaqueta a `.opus` (0% CPU en vivo, cero microcortes).
     """
     query = query.strip()
     is_url = query.startswith("http://") or query.startswith("https://")
 
-    if is_url:
-        vid_id = _extract_youtube_id_from_url(query)
-        if vid_id:
-            yt_meta = _lookup_youtube_metadata(vid_id)
-            proxy_file = _download_youtube_via_companion_issuer(vid_id)
-            if proxy_file:
-                return Song(
-                    title=(yt_meta.get("display_title") if yt_meta else None) or "Canción de YouTube",
-                    file_path=proxy_file,
-                    webpage_url=f"https://www.youtube.com/watch?v={vid_id}",
-                    requester=requester,
-                    duration_str=format_duration(yt_meta.get("duration") if yt_meta else None),
-                    source_name="YouTube",
-                    thumbnail=(yt_meta.get("thumbnail") if yt_meta else f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"),
-                )
+    hq_clients = [["android_testsuite"], ["mediaconnect"], ["tv_embedded"]]
 
-        for client_list in [["android_testsuite"], ["mediaconnect"], ["tv_embedded"]]:
+    if is_url:
+        for client_list in hq_clients:
             res = _download_audio_with_ytdlp(
                 query,
                 extra_opts={"extractor_args": {"youtube": {"player_client": client_list}}},
@@ -435,55 +396,69 @@ def search_song_sync(query: str, requester: str) -> Optional[Song]:
             if res:
                 file_path, info = res
                 return Song(
-                    title=info.get("title") or "Canción de YouTube",
+                    title=info.get("title") or "Canción",
                     file_path=file_path,
                     webpage_url=info.get("webpage_url") or query,
                     requester=requester,
                     duration_str=format_duration(info.get("duration")),
-                    source_name="YouTube",
+                    source_name="YouTube HQ",
                     thumbnail=info.get("thumbnail"),
                 )
-        return None
-
-    # 1. Buscar el video oficial en YouTube
-    yt_meta = _lookup_youtube_metadata(query)
-    if not yt_meta or not yt_meta.get("id"):
-        return None
-
-    vid_id = yt_meta["id"]
-    yt_url = yt_meta.get("url") or f"https://www.youtube.com/watch?v={vid_id}"
-    display_title = yt_meta.get("display_title") or yt_meta.get("title") or query
-
-    # 2. Descargar Format 251 (160kbps 48kHz Studio Opus) vía nodo issuer firmado (funciona directo en Render)
-    proxy_file = _download_youtube_via_companion_issuer(vid_id)
-    if proxy_file:
-        return Song(
-            title=display_title,
-            file_path=proxy_file,
-            webpage_url=yt_url,
-            requester=requester,
-            duration_str=format_duration(yt_meta.get("duration")),
-            source_name="YouTube",
-            thumbnail=yt_meta.get("thumbnail"),
-        )
-
-    # 3. Respaldo directo con yt-dlp
-    for client_list in [["android_testsuite"], ["mediaconnect"], ["tv_embedded"]]:
-        res = _download_audio_with_ytdlp(
-            yt_url,
-            extra_opts={"extractor_args": {"youtube": {"player_client": client_list}}},
-        )
+        res = _download_audio_with_ytdlp(query)
         if res:
             file_path, info = res
             return Song(
-                title=display_title,
+                title=info.get("title") or "Canción",
                 file_path=file_path,
-                webpage_url=yt_url,
+                webpage_url=info.get("webpage_url") or query,
                 requester=requester,
-                duration_str=format_duration(yt_meta.get("duration") or info.get("duration")),
-                source_name="YouTube",
-                thumbnail=yt_meta.get("thumbnail") or info.get("thumbnail"),
+                duration_str=format_duration(info.get("duration")),
+                source_name="Audio HQ",
+                thumbnail=info.get("thumbnail"),
             )
+        return None
+
+    # 1. Buscar la ficha oficial en YouTube
+    yt_meta = _lookup_youtube_metadata(query)
+    yt_url = yt_meta.get("url") if yt_meta else None
+    display_title = (yt_meta.get("display_title") if yt_meta else None) or query
+
+    # 2. Intentar descarga directa de YouTube Format 251
+    if yt_url:
+        for client_list in hq_clients:
+            res = _download_audio_with_ytdlp(
+                yt_url,
+                extra_opts={"extractor_args": {"youtube": {"player_client": client_list}}},
+            )
+            if res:
+                file_path, info = res
+                return Song(
+                    title=display_title,
+                    file_path=file_path,
+                    webpage_url=yt_url,
+                    requester=requester,
+                    duration_str=format_duration(yt_meta.get("duration") or info.get("duration")),
+                    source_name="YouTube HQ",
+                    thumbnail=yt_meta.get("thumbnail") or info.get("thumbnail"),
+                )
+
+    # 3. Respaldo automático de alta fidelidad (160kbps pre-convertido a .opus sin uso de CPU en vivo)
+    fb_res = _download_hq_fallback(query, yt_meta=yt_meta)
+    if fb_res:
+        file_path, fb_info = fb_res
+        final_title = display_title if yt_meta else (fb_info.get("title") or query)
+        webpage_url = yt_url or fb_info.get("webpage_url") or "https://www.youtube.com"
+        duration_str = format_duration(fb_info.get("duration") or (yt_meta.get("duration") if yt_meta else None))
+        thumbnail = (yt_meta.get("thumbnail") if yt_meta else None) or fb_info.get("thumbnail")
+        return Song(
+            title=final_title,
+            file_path=file_path,
+            webpage_url=webpage_url,
+            requester=requester,
+            duration_str=duration_str,
+            source_name="YouTube / Audio HQ",
+            thumbnail=thumbnail,
+        )
 
     return None
 
@@ -649,9 +624,9 @@ def setup_music_commands(bot: commands.Bot) -> None:
 
     @bot.tree.command(
         name="victiniplay",
-        description="Victini entra a tu canal de voz y reproduce la canción de YouTube que pidas 🎶🔥",
+        description="Victini entra a tu canal de voz y reproduce la canción que pidas 🎶🔥",
     )
-    @app_commands.describe(cancion="Nombre de la canción o link de YouTube que querés escuchar")
+    @app_commands.describe(cancion="Nombre de la canción o link que querés escuchar")
     async def victiniplay_command(interaction: discord.Interaction, cancion: str):
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message(
@@ -683,7 +658,7 @@ def setup_music_commands(bot: commands.Bot) -> None:
 
         if song is None:
             await interaction.followup.send(
-                f"❌ No pude encontrar ni descargar el audio de YouTube para **`{cancion}`**. Probá con otro nombre o autor. 🔥"
+                f"❌ No pude encontrar ni descargar el audio para **`{cancion}`**. Probá con otro nombre o autor. 🔥"
             )
             return
 
