@@ -380,9 +380,10 @@ def get_leaderboard(guild_id: int, limit: int = 10, offset: int = 0) -> Tuple[Li
         return rows, total_users
 
 
-def get_global_web_leaderboard(limit: int = 25) -> List[dict]:
+def get_global_web_leaderboard(limit: int = 50) -> List[dict]:
     """
-    Retorna el ranking en formato diccionario para mostrar en la WebApp de SNAP! en Render.
+    Retorna el ranking en formato diccionario para mostrar en la WebApp de SNAP! en Render,
+    incluyendo nivel, XP, Pokéballs y el equipo Pokémon de cada jugador.
     """
     init_db()
     with closing(_get_conn()) as conn:
@@ -390,7 +391,7 @@ def get_global_web_leaderboard(limit: int = 25) -> List[dict]:
         cursor.execute(
             _sql(
                 """
-                SELECT username, level, xp
+                SELECT guild_id, user_id, username, level, xp, pokeballs
                 FROM user_levels
                 ORDER BY level DESC, xp DESC, user_id ASC
                 LIMIT ?
@@ -399,8 +400,29 @@ def get_global_web_leaderboard(limit: int = 25) -> List[dict]:
             (limit,),
         )
         rows = cursor.fetchall()
+
+        cursor.execute(
+            _sql(
+                """
+                SELECT guild_id, user_id, pokedex_id, name, rarity, is_shiny
+                FROM user_pokemon
+                ORDER BY id ASC
+                """
+            )
+        )
+        teams_map: dict[tuple[int, int], List[dict]] = {}
+        for gid, uid, pid, pname, rarity, is_shiny in cursor.fetchall():
+            teams_map.setdefault((gid, uid), []).append(
+                {
+                    "pokedex_id": pid,
+                    "name": pname,
+                    "rarity": rarity,
+                    "is_shiny": bool(is_shiny),
+                }
+            )
+
         result = []
-        for idx, (username, level, xp) in enumerate(rows, start=1):
+        for idx, (gid, uid, username, level, xp, pokeballs) in enumerate(rows, start=1):
             result.append(
                 {
                     "rank": idx,
@@ -408,6 +430,8 @@ def get_global_web_leaderboard(limit: int = 25) -> List[dict]:
                     "level": level,
                     "xp": xp,
                     "next_xp": xp_for_next_level(level),
+                    "pokeballs": pokeballs,
+                    "team": teams_map.get((gid, uid), [])[:6],
                 }
             )
         return result
