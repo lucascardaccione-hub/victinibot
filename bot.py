@@ -27,7 +27,7 @@ from database import (
     import_guild_levels,
 )
 from music import setup_music_commands
-from pokemon_game import setup_pokemon_commands
+from pokemon_game import setup_pokemon_commands, build_welcome_card_png
 
 # Forzar salida sin buffer en Render para que todos los print() aparezcan al instante en los Logs
 sys.stdout.reconfigure(line_buffering=True)
@@ -484,7 +484,25 @@ async def on_member_join(member: discord.Member):
         f"Bienvenido {member.mention}, acá vas a poder hacer muchas cosas y conocer gente muy copada, "
         f"pero no te pases de vivo/a porque estoy viendo todo"
     )
-    await welcome_channel.send(welcome_msg)
+
+    avatar_bytes: Optional[bytes] = None
+    try:
+        avatar_bytes = await member.display_avatar.with_size(256).read()
+    except Exception:
+        pass
+
+    try:
+        png_bytes = await asyncio.to_thread(
+            build_welcome_card_png,
+            member.display_name,
+            member.guild.member_count or 1,
+            avatar_bytes,
+        )
+        welcome_file = discord.File(io.BytesIO(png_bytes), filename=f"bienvenida_{member.id}.png")
+        await welcome_channel.send(content=welcome_msg, file=welcome_file)
+    except Exception as e:
+        print(f"⚠️ Error generando imagen de bienvenida: {e}", flush=True)
+        await welcome_channel.send(welcome_msg)
 
 
 # ==========================================
