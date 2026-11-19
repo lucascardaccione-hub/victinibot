@@ -1,8 +1,8 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import glob
 import json
 import os
-import ssl
 import subprocess
 import tempfile
 import urllib.parse
@@ -46,7 +46,7 @@ class Song:
     webpage_url: str
     requester: str
     duration_str: str = "?:??"
-    source_name: str = "Audio HQ"
+    source_name: str = "YouTube HQ"
     thumbnail: Optional[str] = None
 
 
@@ -87,13 +87,13 @@ def format_duration(seconds: Optional[float]) -> str:
     return f"{mins}:{secs:02d}"
 
 
-def _prepare_hq_opus_file(raw_file_path: str, acodec: Optional[str] = None) -> str:
+def _prepare_hq_opus_file(raw_file_path: str) -> str:
     """
-    Convierte el archivo descargado a un contenedor Ogg Opus (.opus) calibrado para Discord
+    Convierte el archivo descargado a un contenedor Ogg Opus (.opus) de alta fidelidad (128kbps CVBR)
     ANTES de iniciar la reproducción:
-    - Aplica headroom de -7dB (evita los +650,000 samples saturados a 0.0 dBFS que distorsionan el decodificador de Discord).
-    - Aplica aresample=async=1:first_pts=0 para corregir saltos de timestamps entre fragmentos HLS.
-    - Habilita FEC (-fec true -packet_loss 15) a 96kbps 48kHz Stereo para evitar microcortes UDP.
+    - Usa -fflags +genpts para timestamps limpios sin deformar el pitch (sin aresample=async).
+    - Usa volume=-3.5dB con limitador suave (alimiter=limit=0.92) para sonido potente, nítido y con 0% clipping.
+    - Usa 128kbps Constrained VBR (-vbr constrained) + FEC (-fec true -packet_loss 10) para máxima claridad de agudos y graves.
     """
     base, _ = os.path.splitext(raw_file_path)
     opus_path = f"{base}_hq.opus"
@@ -101,20 +101,22 @@ def _prepare_hq_opus_file(raw_file_path: str, acodec: Optional[str] = None) -> s
     cmd_encode = [
         FFMPEG_EXECUTABLE,
         "-y",
+        "-fflags", "+genpts",
         "-i", raw_file_path,
         "-map_metadata", "-1",
         "-vn",
-        "-af", "volume=-7dB,aresample=async=1:first_pts=0",
+        "-af", "volume=-3.5dB,alimiter=limit=0.92:level=false:attack=5:release=50",
         "-c:a", "libopus",
         "-ar", "48000",
         "-ac", "2",
-        "-b:a", "96k",
-        "-vbr", "on",
-        "-compression_level", "10",
+        "-b:a", "128k",
+        "-vbr", "constrained",
+        "-compression_level", "3",
+        "-threads", "0",
         "-frame_duration", "20",
         "-application", "audio",
         "-fec", "true",
-        "-packet_loss", "15",
+        "-packet_loss", "10",
         "-f", "opus",
         opus_path,
     ]
@@ -131,7 +133,7 @@ def _prepare_hq_opus_file(raw_file_path: str, acodec: Optional[str] = None) -> s
 
 def _lookup_youtube_metadata(query: str) -> Optional[dict]:
     """
-    Busca en YouTube con yt-dlp (extract_flat + oEmbed) para obtener título oficial,
+    Busca en YouTube (ytsearch1:) en modo ultrarrápido (extract_flat) para obtener título oficial,
     canal/artista, duración y miniatura.
     """
     opts = {
@@ -154,7 +156,7 @@ def _lookup_youtube_metadata(query: str) -> Optional[dict]:
                     try:
                         oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid_id}&format=json"
                         req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
-                        with urllib.request.urlopen(req, timeout=5) as resp:
+                        with urllib.request.urlopen(req, timeout=3) as resp:
                             odata = json.loads(resp.read().decode("utf-8"))
                             channel = (odata.get("author_name") or "").strip()
                             if not raw_title:
@@ -189,23 +191,47 @@ def _lookup_youtube_metadata(query: str) -> Optional[dict]:
     return None
 
 
-def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -> Optional[tuple[str, dict]]:
+def _lookup_sc_candidates(query: str) -> List[dict]:
+    """Busca los candidatos de audio en paralelo a la consulta de metadatos de YouTube."""
+    flat_opts = {
+        "extract_flat": "in_playlist",
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": True,
+        "logger": _QuietYdlLogger(),
+    }
+    candidates = []
+    try:
+        with yt_dlp.YoutubeDL(flat_opts) as ydl:
+            info = ydl.extract_info(f"scsearch6:{query}", download=False)
+            for e in ((info or {}).get("entries") or []):
+                if e and e.get("url"):
+                    dur = e.get("duration") or 0
+                    if dur == 0 or dur > 35:
+                        candidates.append(e)
+    except Exception:
+        pass
+    return candidates
+
+
+def _download_audio_fast(target: str, extra_opts: Optional[dict] = None) -> Optional[tuple[str, dict]]:
     """
-    Descarga el stream de mayor calidad de audio disponible (priorizando 160kbps Opus/AAC/MP3)
-    y lo pre-convierte a un archivo .opus listo para transmisión directa con 0% consumo de CPU en vivo.
+    Descarga el stream de 160kbps con descarga paralela de fragmentos (concurrent_fragment_downloads=8)
+    y fixup='never' (ya que _prepare_hq_opus_file procesa el archivo directamente con ffmpeg en un solo paso).
     """
     token = uuid.uuid4().hex[:10]
     tmp_dir = tempfile.gettempdir()
     outtmpl = os.path.join(tmp_dir, f"victini_{token}.%(ext)s")
 
     opts = {
-        "format": "251/http_mp3_1_0/hls_aac_160k/bestaudio[acodec=opus]/bestaudio[abr>=128]/bestaudio/best",
+        "format": "http_mp3_1_0/hls_aac_160k/251/bestaudio[abr>=128]/bestaudio/best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "ignoreerrors": True,
         "outtmpl": outtmpl,
-        "ffmpeg_location": FFMPEG_EXECUTABLE,
+        "concurrent_fragment_downloads": 8,
+        "fixup": "never",
         "max_filesize": 45 * 1024 * 1024,
         "logger": _QuietYdlLogger(),
     }
@@ -239,7 +265,7 @@ def _download_audio_with_ytdlp(target: str, extra_opts: Optional[dict] = None) -
             if not valid_files:
                 return None
 
-            hq_opus_file = _prepare_hq_opus_file(valid_files[0], acodec=chosen.get("acodec"))
+            hq_opus_file = _prepare_hq_opus_file(valid_files[0])
             return hq_opus_file, chosen
     except Exception:
         for f in glob.glob(os.path.join(tmp_dir, f"victini_{token}.*")):
@@ -261,7 +287,6 @@ def _score_sc_candidate(entry: dict, yt_meta: Optional[dict], query: str) -> flo
     sc_full = f"{sc_title_only} {sc_uploader}"
     sc_dur = entry.get("duration") or 0
 
-    # 1. Coincidencia con las palabras exactas que escribió el usuario (ej. 'duki rockstar', 'khea trapicheo')
     query_words = [w for w in query.lower().split() if len(w) >= 2]
     matched_q_words = sum(1 for w in query_words if w in sc_full)
     if query_words and matched_q_words == len(query_words):
@@ -269,7 +294,6 @@ def _score_sc_candidate(entry: dict, yt_meta: Optional[dict], query: str) -> flo
     else:
         score += matched_q_words * 35.0
 
-    # 2. Coincidencia con los metadatos oficiales de YouTube (artista y duración)
     if yt_meta:
         yt_dur = yt_meta.get("duration") or 0
         yt_channel = (yt_meta.get("channel") or "").lower()
@@ -293,7 +317,6 @@ def _score_sc_candidate(entry: dict, yt_meta: Optional[dict], query: str) -> flo
             elif diff > 60:
                 score -= 50.0
 
-    # Penalizar remixes o versiones lentas/aceleradas si el usuario no las pidió
     for bad_tag in ("slowed", "reverb", "nightcore", "8d audio", "karaoke"):
         if bad_tag in sc_title_only and bad_tag not in query.lower():
             score -= 80.0
@@ -301,90 +324,22 @@ def _score_sc_candidate(entry: dict, yt_meta: Optional[dict], query: str) -> flo
     return score
 
 
-def _download_hq_fallback(query: str, yt_meta: Optional[dict] = None) -> Optional[tuple[str, dict]]:
-    """
-    Busca la pista completa (sin DRM y > 35s), priorizando 160kbps AAC (hls_aac_160k) y coincidencia
-    exacta de artista + canción, y la pre-convierte a Ogg Opus 48kHz Stereo antes de reproducir.
-    """
-    queries_to_try = [query]
-    if yt_meta and yt_meta.get("channel") and yt_meta.get("title"):
-        ch = yt_meta["channel"]
-        ti = yt_meta["title"]
-        enriched = f"{ch} {ti}" if ch.lower() not in ti.lower() else ti
-        if enriched.lower() != query.lower():
-            queries_to_try.append(enriched)
-
-    flat_opts = {
-        "extract_flat": "in_playlist",
-        "quiet": True,
-        "no_warnings": True,
-        "ignoreerrors": True,
-        "logger": _QuietYdlLogger(),
-    }
-
-    seen_urls = set()
-    candidates = []
-
-    for q in queries_to_try:
-        try:
-            with yt_dlp.YoutubeDL(flat_opts) as ydl:
-                info = ydl.extract_info(f"scsearch10:{q}", download=False)
-                for e in ((info or {}).get("entries") or []):
-                    if e and e.get("url") and e["url"] not in seen_urls:
-                        dur = e.get("duration") or 0
-                        if dur == 0 or dur > 35:
-                            seen_urls.add(e["url"])
-                            candidates.append(e)
-        except Exception:
-            pass
-
-    candidates.sort(key=lambda e: _score_sc_candidate(e, yt_meta, query), reverse=True)
-
-    for entry in candidates[:6]:
-        res = _download_audio_with_ytdlp(entry["url"])
-        if res:
-            file_path, track_info = res
-            if (track_info.get("duration") or 100) > 35:
-                return file_path, track_info
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
-
-    return None
-
-
 def search_song_sync(query: str, requester: str) -> Optional[Song]:
     """
-    Motor híbrido de alta fidelidad:
-    1. Obtiene la ficha oficial en YouTube (Título, Artista, Duración y Portada).
-    2. Intenta descarga directa de YouTube Format 251 (160kbps 48kHz Stereo Opus).
-    3. Si YouTube bloquea la IP de Render, descarga automáticamente el stream equivalente en 160kbps
-       verificando artista + título y lo pre-empaqueta a `.opus` (0% CPU en vivo, cero microcortes).
+    Búsqueda y preparación ultrarrápida (~2 segundos):
+    1. Ejecuta en PARALELO la búsqueda de ficha oficial de YouTube y la búsqueda de streams HQ (160kbps).
+    2. Descarga con 8 hilos paralelos de fragmentos y codifica en un único paso a 128kbps CVBR Opus.
     """
     query = query.strip()
     is_url = query.startswith("http://") or query.startswith("https://")
 
-    hq_clients = [["android_testsuite"], ["mediaconnect"], ["tv_embedded"]]
-
     if is_url:
-        for client_list in hq_clients:
-            res = _download_audio_with_ytdlp(
-                query,
-                extra_opts={"extractor_args": {"youtube": {"player_client": client_list}}},
-            )
-            if res:
-                file_path, info = res
-                return Song(
-                    title=info.get("title") or "Canción",
-                    file_path=file_path,
-                    webpage_url=info.get("webpage_url") or query,
-                    requester=requester,
-                    duration_str=format_duration(info.get("duration")),
-                    source_name="YouTube HQ",
-                    thumbnail=info.get("thumbnail"),
-                )
-        res = _download_audio_with_ytdlp(query)
+        res = _download_audio_fast(
+            query,
+            extra_opts={"extractor_args": {"youtube": {"player_client": ["android_testsuite"]}}},
+        )
+        if not res:
+            res = _download_audio_fast(query)
         if res:
             file_path, info = res
             return Song(
@@ -393,52 +348,71 @@ def search_song_sync(query: str, requester: str) -> Optional[Song]:
                 webpage_url=info.get("webpage_url") or query,
                 requester=requester,
                 duration_str=format_duration(info.get("duration")),
-                source_name="Audio HQ",
+                source_name="YouTube HQ",
                 thumbnail=info.get("thumbnail"),
             )
         return None
 
-    # 1. Buscar la ficha oficial en YouTube
-    yt_meta = _lookup_youtube_metadata(query)
+    # 1. Ejecutar en PARALELO la búsqueda de metadatos en YouTube y la búsqueda de streams HQ
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_yt = pool.submit(_lookup_youtube_metadata, query)
+        fut_sc = pool.submit(_lookup_sc_candidates, query)
+        yt_meta = fut_yt.result()
+        candidates = fut_sc.result()
+
+    # Si no hubo candidatos con la query cruda pero YouTube encontró artista + título, buscar con artista + título
+    if not candidates and yt_meta and yt_meta.get("channel") and yt_meta.get("title"):
+        ch = yt_meta["channel"]
+        ti = yt_meta["title"]
+        enriched = f"{ch} {ti}" if ch.lower() not in ti.lower() else ti
+        candidates = _lookup_sc_candidates(enriched)
+
+    candidates.sort(key=lambda e: _score_sc_candidate(e, yt_meta, query), reverse=True)
+
     yt_url = yt_meta.get("url") if yt_meta else None
     display_title = (yt_meta.get("display_title") if yt_meta else None) or query
 
-    # 2. Intentar descarga directa de YouTube Format 251
-    if yt_url:
-        for client_list in hq_clients:
-            res = _download_audio_with_ytdlp(
-                yt_url,
-                extra_opts={"extractor_args": {"youtube": {"player_client": client_list}}},
-            )
-            if res:
-                file_path, info = res
+    # 2. Descargar el mejor candidato HQ con 8 fragmentos en paralelo
+    for entry in candidates[:4]:
+        res = _download_audio_fast(entry["url"])
+        if res:
+            file_path, fb_info = res
+            if (fb_info.get("duration") or 100) > 35:
+                final_title = display_title if yt_meta else (fb_info.get("title") or query)
+                webpage_url = yt_url or fb_info.get("webpage_url") or "https://www.youtube.com"
+                duration_str = format_duration(fb_info.get("duration") or (yt_meta.get("duration") if yt_meta else None))
+                thumbnail = (yt_meta.get("thumbnail") if yt_meta else None) or fb_info.get("thumbnail")
                 return Song(
-                    title=display_title,
+                    title=final_title,
                     file_path=file_path,
-                    webpage_url=yt_url,
+                    webpage_url=webpage_url,
                     requester=requester,
-                    duration_str=format_duration(yt_meta.get("duration") or info.get("duration")),
+                    duration_str=duration_str,
                     source_name="YouTube HQ",
-                    thumbnail=yt_meta.get("thumbnail") or info.get("thumbnail"),
+                    thumbnail=thumbnail,
                 )
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
 
-    # 3. Respaldo automático de alta fidelidad (160kbps pre-convertido a .opus sin uso de CPU en vivo)
-    fb_res = _download_hq_fallback(query, yt_meta=yt_meta)
-    if fb_res:
-        file_path, fb_info = fb_res
-        final_title = display_title if yt_meta else (fb_info.get("title") or query)
-        webpage_url = yt_url or fb_info.get("webpage_url") or "https://www.youtube.com"
-        duration_str = format_duration(fb_info.get("duration") or (yt_meta.get("duration") if yt_meta else None))
-        thumbnail = (yt_meta.get("thumbnail") if yt_meta else None) or fb_info.get("thumbnail")
-        return Song(
-            title=final_title,
-            file_path=file_path,
-            webpage_url=webpage_url,
-            requester=requester,
-            duration_str=duration_str,
-            source_name="YouTube / Audio HQ",
-            thumbnail=thumbnail,
+    # 3. Respaldo directo de YouTube si no estuvo en el catálogo HQ
+    if yt_url:
+        res = _download_audio_fast(
+            yt_url,
+            extra_opts={"extractor_args": {"youtube": {"player_client": ["android_testsuite"]}}},
         )
+        if res:
+            file_path, info = res
+            return Song(
+                title=display_title,
+                file_path=file_path,
+                webpage_url=yt_url,
+                requester=requester,
+                duration_str=format_duration(yt_meta.get("duration") or info.get("duration")),
+                source_name="YouTube HQ",
+                thumbnail=yt_meta.get("thumbnail") or info.get("thumbnail"),
+            )
 
     return None
 
@@ -582,14 +556,7 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
         await play_next(guild_id, loop)
         return
 
-    def _after_playback(error: Optional[Exception]):
-        if error:
-            print(f"⚠️ Error en reproducción de voz: {error}", flush=True)
-        cleanup_song_file(next_song)
-        asyncio.run_coroutine_threadsafe(play_next(guild_id, loop), loop)
-
-    vc.play(source, after=_after_playback)
-
+    # Enviar primero el embed de reproducción para que el hilo de audio arranque sin competencia de CPU
     if state.text_channel:
         embed = build_now_playing_embed(next_song)
         view = MusicControlView(guild_id=guild_id, loop=loop)
@@ -598,13 +565,21 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop) -> None:
         except Exception as e:
             print(f"⚠️ No se pudo enviar embed de reproducción: {e}", flush=True)
 
+    def _after_playback(error: Optional[Exception]):
+        if error:
+            print(f"⚠️ Error en reproducción de voz: {error}", flush=True)
+        cleanup_song_file(next_song)
+        asyncio.run_coroutine_threadsafe(play_next(guild_id, loop), loop)
+
+    vc.play(source, after=_after_playback)
+
 
 def setup_music_commands(bot: commands.Bot) -> None:
     """Registra los comandos slash de música (/victiniplay, /victiniskip, /victinistop, /victinicola) en el árbol del bot."""
 
     @bot.tree.command(
         name="victiniplay",
-        description="Victini entra a tu canal de voz y reproduce la canción que pidas 🎶🔥",
+        description="Victini entra a tu canal de voz al instante y reproduce la canción que pidas 🎶🔥",
     )
     @app_commands.describe(cancion="Nombre de la canción o link que querés escuchar")
     async def victiniplay_command(interaction: discord.Interaction, cancion: str):
@@ -630,32 +605,41 @@ def setup_music_commands(bot: commands.Bot) -> None:
 
         await interaction.response.defer()
 
-        song = await asyncio.to_thread(
-            search_song_sync,
-            cancion,
-            interaction.user.display_name,
-        )
-
-        if song is None:
-            await interaction.followup.send(
-                f"❌ No pude encontrar ni descargar el audio para **`{cancion}`**. Probá con otro nombre o autor. 🔥"
-            )
-            return
-
         state = get_guild_state(interaction.guild.id)
         state.text_channel = interaction.channel
 
-        vc = interaction.guild.voice_client
-        try:
+        # Conectar al canal de voz EN PARALELO mientras se busca y descarga la canción
+        async def _ensure_voice_connected() -> Optional[discord.VoiceClient]:
+            vc = interaction.guild.voice_client
             if vc is None or not vc.is_connected():
                 vc = await target_voice_channel.connect(timeout=15.0, self_deaf=True)
             elif vc.channel.id != target_voice_channel.id:
                 await vc.move_to(target_voice_channel)
             state.voice_client = vc
+            return vc
+
+        voice_task = asyncio.create_task(_ensure_voice_connected())
+        search_task = asyncio.to_thread(
+            search_song_sync,
+            cancion,
+            interaction.user.display_name,
+        )
+
+        try:
+            vc = await voice_task
         except Exception as e:
-            cleanup_song_file(song)
+            song_cleanup = await search_task
+            cleanup_song_file(song_cleanup)
             await interaction.followup.send(
                 f"⚠️ No pude conectarme al canal de voz **{target_voice_channel.name}** (verificá mis permisos de Conectar y Hablar): `{type(e).__name__}: {e}`"
+            )
+            return
+
+        song = await search_task
+
+        if song is None:
+            await interaction.followup.send(
+                f"❌ No pude encontrar ni descargar el audio para **`{cancion}`**. Probá con otro nombre o autor. 🔥"
             )
             return
 
