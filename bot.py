@@ -1,6 +1,7 @@
 import asyncio
 import io
 import os
+import re
 import sys
 import time
 import json
@@ -487,14 +488,109 @@ async def on_member_join(member: discord.Member):
 
 
 # ==========================================
-# 2A. SISTEMA DE NIVELES: MENSAJES EN CANALES DE TEXTO
+# 2A. INTERACCIÓN DE VICTINI EN EL CHAT + NIVELES EN TEXTO
 # ==========================================
+_last_chat_reply: dict[int, float] = {}
+
+INSULT_WORDS = (
+    "boludo", "boluda", "pelotudo", "pelotuda", "idiota", "tonto", "tonta",
+    "estupido", "estupida", "forro", "forra", "gil", "bobo", "boba",
+    "inutil", "mierda", "basura", "poronga", "puto", "puta", "concha",
+    "mogolico", "mogolica", "salame", "tarado", "tarada", "imbecil",
+    "cagon", "cagona", "feo", "horrible", "inservible", "chupala",
+    "cagar", "hdp", "culiado", "culiada", "pajero", "pajera", "petizo", "petiso",
+)
+
+MOCKING_INSULT_REPLIES = [
+    "Jajaja mirá quién habla, tremendo fantasma 👻😂. **Ubicate o te baneo, pancho** 🔥😈",
+    "¿En serio me venís a bardear a mí que soy la mascota de SNAP!? JAJAJA qué atrevido 💀. **Ubicate o te baneo, pancho** 🔥😈",
+    "Uff, cuidado con el teclado que se te va a gastar, crack 🤣. **Ubicate o te baneo, pancho** 🔥😈",
+    "¿Todo bien en casa? Venís a picantearla con un Pokémon legendario 😂🔥. **Ubicate o te baneo, pancho** 🔥😈",
+    "JAJAJA seguí hablando así y mis llamas te dejan en Nivel 0 👀😂. **Ubicate o te baneo, pancho** 🔥😈",
+]
+
+VICTINI_FRIENDLY_REPLIES = [
+    "¡Acá estoy! 🔥✌️ Siempre vigilando que nadie se pase de vivo en **SNAP!** 👀",
+    "¿Alguien me invocó? ✌️🔥 ¡Estoy al 100% al servicio de **SNAP!**",
+    "¡Presente! 🔥 Si querés música usá `/victiniplay`, y si querés atrapar Pokémon pasate por `🎮𝑪𝑨𝑻𝑪𝑯` 👀",
+    "¡Buenas! ✌️🔥 Recordá que cada nivel que subís te da **+1 Pokéball** para usar en `/catch` 🎱",
+    "¿Qué onda? 👀🔥 Seguí charlando o activo en voz para subir en el `/ranking` de **SNAP!**",
+]
+
+
+def _normalize_plain(text: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+
+
+def _mentions_victini_name(text: str) -> bool:
+    plain = _normalize_plain(text)
+    return bool(re.search(r"v\W*i\W*c\W*t\W*i\W*n\W*i", plain))
+
+
+def _contains_insult(text: str) -> bool:
+    plain = _normalize_plain(text)
+    tokens = re.findall(r"[a-z0-9]+", plain)
+    for word in INSULT_WORDS:
+        if word in tokens or (len(word) >= 5 and word in plain):
+            return True
+    return False
+
+
+async def _maybe_reply_as_victini(message: discord.Message) -> None:
+    if bot.user is None:
+        return
+
+    mentioned_bot = bot.user in message.mentions
+    named_victini = _mentions_victini_name(message.content)
+    replied_to_bot = False
+
+    if message.reference and message.reference.message_id:
+        ref_msg = message.reference.resolved
+        if isinstance(ref_msg, discord.Message) and ref_msg.author.id == bot.user.id:
+            replied_to_bot = True
+        elif ref_msg is None:
+            try:
+                fetched = await message.channel.fetch_message(message.reference.message_id)
+                if fetched.author.id == bot.user.id:
+                    replied_to_bot = True
+            except Exception:
+                pass
+
+    if not (mentioned_bot or named_victini or replied_to_bot):
+        return
+
+    now = time.time()
+    if now - _last_chat_reply.get(message.channel.id, 0.0) < 4.0:
+        return
+    _last_chat_reply[message.channel.id] = now
+
+    if _contains_insult(message.content):
+        reply_text = random.choice(MOCKING_INSULT_REPLIES)
+    else:
+        plain = _normalize_plain(message.content)
+        if any(g in plain for g in ("hola", "buenas", "buen dia", "buenas tardes", "buenas noches")):
+            reply_text = f"¡Hola {message.author.mention}! 🔥✌️ Acá **Victini** vigilando todo en **SNAP!** 👀"
+        elif any(g in plain for g in ("gracias", "crack", "idolo", "genio", "capo")):
+            reply_text = f"¡De nada {message.author.mention}! 🔥✌️ Para eso está la mascota oficial de **SNAP!**"
+        else:
+            reply_text = random.choice(VICTINI_FRIENDLY_REPLIES)
+
+    try:
+        await message.reply(reply_text, mention_author=False)
+    except Exception:
+        pass
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
         return
 
-    # Sumar XP únicamente por mensajes enviados en canales de texto (o hilos de canales de texto)
+    # 1. Interacción de Victini si lo arroban, le responden o dicen "Victini"
+    await _maybe_reply_as_victini(message)
+
+    # 2. Sumar XP únicamente por mensajes enviados en canales de texto (o hilos de canales de texto)
     is_text_channel = isinstance(message.channel, (discord.TextChannel, discord.Thread))
     if is_text_channel:
         xp_gained = random.randint(XP_MIN, XP_MAX)
