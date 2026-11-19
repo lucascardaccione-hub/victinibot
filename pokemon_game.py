@@ -365,7 +365,7 @@ def build_welcome_card_png(
 
     draw.text((232, 84), "BIENVENIDO/A A SNAP!", font=f_tag, fill=(255, 159, 28, 255))
     draw.text((232, 124), clean_user, font=f_user, fill=(255, 255, 255, 255))
-    draw.text((232, 182), f"Miembro #{member_count}  |  Vigilado por Victini", font=f_sub, fill=(195, 200, 225, 255))
+    draw.text((232, 182), f"Miembro #{member_count}  |  Comunidad SNAP!", font=f_sub, fill=(195, 200, 225, 255))
 
     # Artwork oficial de Victini a la derecha
     if victini_bytes:
