@@ -19,6 +19,7 @@ from database import (
     get_pokemon_team,
     add_pokemon_to_team,
     replace_pokemon_in_team,
+    add_pokemon_xp,
     get_user_stats,
 )
 
@@ -115,6 +116,42 @@ POKEMON_POOL: List[PokemonSpecies] = [
     PokemonSpecies(493, "Arceus", "Legendario", "Normal ✨"),
     PokemonSpecies(494, "Victini", "Legendario", "Psíquico / Fuego 🔥✌️"),
 ]
+
+RARITY_POWER = {
+    "Común": 1,
+    "Raro": 4,
+    "Épico": 7,
+    "Legendario": 11,
+}
+
+# Tabla de evoluciones por nivel: pokedex_id -> siguiente evolución
+EVOLUTION_TABLE = {
+    1: {"min_level": 16, "to_id": 2, "to_name": "Ivysaur", "to_type": "Planta / Veneno 🌿", "to_rarity": "Raro"},
+    2: {"min_level": 32, "to_id": 3, "to_name": "Venusaur", "to_type": "Planta / Veneno 🌿", "to_rarity": "Raro"},
+    4: {"min_level": 16, "to_id": 5, "to_name": "Charmeleon", "to_type": "Fuego 🔥", "to_rarity": "Raro"},
+    5: {"min_level": 36, "to_id": 6, "to_name": "Charizard", "to_type": "Fuego / Volador 🔥", "to_rarity": "Raro"},
+    7: {"min_level": 16, "to_id": 8, "to_name": "Wartortle", "to_type": "Agua 💧", "to_rarity": "Raro"},
+    8: {"min_level": 36, "to_id": 9, "to_name": "Blastoise", "to_type": "Agua 💧", "to_rarity": "Raro"},
+    25: {"min_level": 22, "to_id": 26, "to_name": "Raichu", "to_type": "Eléctrico ⚡", "to_rarity": "Raro"},
+    39: {"min_level": 20, "to_id": 40, "to_name": "Wigglytuff", "to_type": "Normal / Hada 🌸", "to_rarity": "Raro"},
+    52: {"min_level": 24, "to_id": 53, "to_name": "Persian", "to_type": "Normal ⭐", "to_rarity": "Raro"},
+    54: {"min_level": 26, "to_id": 55, "to_name": "Golduck", "to_type": "Agua 💧", "to_rarity": "Raro"},
+    58: {"min_level": 24, "to_id": 59, "to_name": "Arcanine", "to_type": "Fuego 🔥", "to_rarity": "Raro"},
+    92: {"min_level": 18, "to_id": 93, "to_name": "Haunter", "to_type": "Fantasma / Veneno 👻", "to_rarity": "Raro"},
+    93: {"min_level": 32, "to_id": 94, "to_name": "Gengar", "to_type": "Fantasma / Veneno 👻", "to_rarity": "Raro"},
+    129: {"min_level": 20, "to_id": 130, "to_name": "Gyarados", "to_type": "Agua / Volador 💧", "to_rarity": "Raro"},
+    133: {"min_level": 20, "to_id": 197, "to_name": "Umbreon", "to_type": "Siniestro 🌑", "to_rarity": "Raro"},
+    252: {"min_level": 16, "to_id": 253, "to_name": "Grovyle", "to_type": "Planta 🌿", "to_rarity": "Raro"},
+    253: {"min_level": 36, "to_id": 254, "to_name": "Sceptile", "to_type": "Planta 🌿", "to_rarity": "Épico"},
+    255: {"min_level": 16, "to_id": 256, "to_name": "Combusken", "to_type": "Fuego / Lucha 🔥", "to_rarity": "Raro"},
+    256: {"min_level": 36, "to_id": 257, "to_name": "Blaziken", "to_type": "Fuego / Lucha 🔥", "to_rarity": "Épico"},
+    258: {"min_level": 16, "to_id": 259, "to_name": "Marshtomp", "to_type": "Agua / Tierra 💧", "to_rarity": "Raro"},
+    259: {"min_level": 36, "to_id": 260, "to_name": "Swampert", "to_type": "Agua / Tierra 💧", "to_rarity": "Épico"},
+    393: {"min_level": 16, "to_id": 394, "to_name": "Prinplup", "to_type": "Agua 💧", "to_rarity": "Raro"},
+    394: {"min_level": 36, "to_id": 395, "to_name": "Empoleon", "to_type": "Agua / Acero 💧", "to_rarity": "Épico"},
+    447: {"min_level": 22, "to_id": 448, "to_name": "Lucario", "to_type": "Lucha / Acero 🥊", "to_rarity": "Raro"},
+    570: {"min_level": 25, "to_id": 571, "to_name": "Zoroark", "to_type": "Siniestro 🌑", "to_rarity": "Épico"},
+}
 
 
 def get_artwork_url(pokedex_id: int, is_shiny: bool = False) -> str:
@@ -265,14 +302,18 @@ def build_team_card_png(
                 width=2,
             )
 
-            # Badge de rareza arriba a la derecha
+            # Badge de nivel arriba a la izquierda + rareza arriba a la derecha
+            p_lvl = int(mon.get("poke_level") or 1)
+            draw.rounded_rectangle([x0 + 10, y0 + 10, x0 + 74, y0 + 32], radius=8, fill=(255, 107, 53, 230))
+            draw.text((x0 + 18, y0 + 13), f"Nv. {p_lvl}", font=_load_font(12, bold=True), fill=(255, 255, 255, 255))
+
             rarity_txt = _clean_text_for_card(mon["rarity"]).upper()
             draw.rounded_rectangle([x1 - 104, y0 + 10, x1 - 10, y0 + 32], radius=8, fill=(*r_color, 210))
             draw.text((x1 - 96, y0 + 13), rarity_txt[:10], font=_load_font(12, bold=True), fill=(15, 16, 30, 255))
 
             if mon["is_shiny"]:
-                draw.rounded_rectangle([x0 + 10, y0 + 10, x0 + 68, y0 + 32], radius=8, fill=(255, 215, 0, 230))
-                draw.text((x0 + 16, y0 + 13), "SHINY", font=_load_font(12, bold=True), fill=(20, 20, 20, 255))
+                draw.rounded_rectangle([x0 + 80, y0 + 10, x0 + 136, y0 + 32], radius=8, fill=(255, 215, 0, 230))
+                draw.text((x0 + 86, y0 + 13), "SHINY", font=_load_font(12, bold=True), fill=(20, 20, 20, 255))
 
             # Sprite del Pokémon
             sp_bytes = sprite_bytes_list[slot] if slot < len(sprite_bytes_list) else None
@@ -405,7 +446,7 @@ class ReplacePokemonView(discord.ui.View):
 
         for idx, mon in enumerate(team[:6], start=1):
             shiny_tag = "✨ " if mon["is_shiny"] else ""
-            label = f"{idx}. {shiny_tag}{mon['name']} ({mon['rarity']})"
+            label = f"{idx}. {shiny_tag}{mon['name']} ({mon['rarity']})" 
             btn = discord.ui.Button(label=label[:80], style=discord.ButtonStyle.secondary, row=(idx - 1) // 3)
             btn.callback = self._make_replace_callback(mon)
             self.add_item(btn)
@@ -587,8 +628,8 @@ class PostCaptureDecisionView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
-class WildEncounterView(discord.ui.View):
-    """Vista inicial cuando aparece un Pokémon salvaje: permite lanzar Pokéball o huir."""
+class PostBattleCatchView(discord.ui.View):
+    """Vista tras ganar una batalla: permite lanzar Pokéball con +20% de probabilidad o terminar."""
 
     def __init__(
         self,
@@ -604,6 +645,292 @@ class WildEncounterView(discord.ui.View):
         self.author_id = author_id
         self.species = species
         self.is_shiny = is_shiny
+        self.on_backup = on_backup
+
+        base_rate = RARITY_CONFIG[species.rarity]["catch_rate"]
+        boosted_pct = int(min(0.98, base_rate + 0.20) * 100)
+        self.catch_weakened_btn.label = f"🔴 ¡Capturar debilitado! ({boosted_pct}% | Tenés {pokeballs})"
+
+    @discord.ui.button(label="🔴 ¡Capturar debilitado!", style=discord.ButtonStyle.danger)
+    async def catch_weakened_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "🔥 ¡No te robes el encuentro! Tirale `/catch` para buscar el tuyo.",
+                ephemeral=True,
+            )
+            return
+
+        ok, remaining = consume_pokeball(self.guild.id, self.author_id)
+        if not ok:
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(
+                content="❌ ¡Te quedaste sin Pokéballs! Subí de nivel chateando o estando activo en voz para ganar más.",
+                view=self,
+            )
+            return
+
+        cfg = RARITY_CONFIG[self.species.rarity]
+        boosted_rate = min(0.98, cfg["catch_rate"] + 0.20)
+        caught = random.random() <= boosted_rate
+        shiny_tag = "✨ " if self.is_shiny else ""
+
+        if not caught:
+            for item in self.children:
+                item.disabled = True
+            embed = discord.Embed(
+                title=f"💨 ¡Oh no! {shiny_tag}{self.species.name} se escapó...",
+                description=(
+                    f"La Pokéball se movió 1... 2... ¡y se rompió a pesar de estar debilitado! 🔥\n"
+                    f"Te quedan **{remaining}** Pokéballs."
+                ),
+                color=discord.Color.red(),
+            )
+            embed.set_thumbnail(url=get_artwork_url(self.species.pokedex_id, self.is_shiny))
+            embed.set_footer(text="Victini dice: ¡La próxima no falla! ✌️")
+            await interaction.response.edit_message(embed=embed, view=self)
+            asyncio.create_task(self.on_backup(self.guild, True))
+            return
+
+        team = get_pokemon_team(self.guild.id, self.author_id)
+        decision_view = PostCaptureDecisionView(
+            guild=self.guild,
+            author_id=self.author_id,
+            species=self.species,
+            is_shiny=self.is_shiny,
+            team=team,
+            on_backup=self.on_backup,
+        )
+
+        extra_note = (
+            f"\n\n⚠️ **Tu equipo está lleno (`6/6`).** Elegí si querés liberarlo o reemplazar a uno de tu equipo:"
+            if len(team) >= 6
+            else f"\n\nTenés espacio en tu equipo (`{len(team)}/6`). ¿Qué querés hacer?"
+        )
+
+        embed = discord.Embed(
+            title=f"🎉 ¡ATRAPASTE A {shiny_tag}{self.species.name.upper()}! 🔥",
+            description=(
+                f"{cfg['emoji']} **Rareza:** {self.species.rarity} | **Tipo:** {self.species.ptype}\n"
+                f"🎱 **Pokéballs restantes:** {remaining}"
+                f"{extra_note}"
+            ),
+            color=cfg["color"],
+        )
+        embed.set_image(url=get_artwork_url(self.species.pokedex_id, self.is_shiny))
+        embed.set_footer(text="Elegí con los botones de abajo • Victini Bot 🔥✌️")
+        await interaction.response.edit_message(embed=embed, view=decision_view)
+        asyncio.create_task(self.on_backup(self.guild, True))
+
+    @discord.ui.button(label="🏁 Terminar", style=discord.ButtonStyle.secondary)
+    async def finish_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("🔥 Este encuentro no es tuyo.", ephemeral=True)
+            return
+
+        for item in self.children:
+            item.disabled = True
+        embed = discord.Embed(
+            title="🏁 ¡Entrenamiento completado!",
+            description=f"*Dejaste ir a **{self.species.name}** tras la victoria. ¡Buen combate!* 🔥",
+            color=discord.Color.green(),
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+class ChooseFighterView(discord.ui.View):
+    """Permite elegir un Pokémon del equipo para pelear contra el encuentro salvaje."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        author_id: int,
+        species: PokemonSpecies,
+        is_shiny: bool,
+        pokeballs: int,
+        team: list[dict],
+        on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+    ):
+        super().__init__(timeout=120)
+        self.guild = guild
+        self.author_id = author_id
+        self.species = species
+        self.is_shiny = is_shiny
+        self.pokeballs = pokeballs
+        self.team = team
+        self.on_backup = on_backup
+
+        for idx, mon in enumerate(team[:6], start=1):
+            shiny_tag = "✨ " if mon.get("is_shiny") else ""
+            lvl = mon.get("poke_level", 1)
+            btn = discord.ui.Button(
+                label=f"{idx}. {shiny_tag}{mon['name']} (Nv. {lvl})",
+                style=discord.ButtonStyle.primary,
+                row=(idx - 1) // 3,
+            )
+            btn.callback = self._make_fight_cb(mon)
+            self.add_item(btn)
+
+        back_btn = discord.ui.Button(
+            label="↩️ Volver",
+            style=discord.ButtonStyle.secondary,
+            row=2,
+        )
+        back_btn.callback = self._back_cb
+        self.add_item(back_btn)
+
+    def _make_fight_cb(self, mon: dict):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message("🔥 Este encuentro no es tuyo.", ephemeral=True)
+                return
+
+            fighter_lvl = int(mon.get("poke_level", 1))
+            fighter_power = RARITY_POWER.get(mon["rarity"], 10) + fighter_lvl * 3 + (5 if mon.get("is_shiny") else 0)
+
+            wild_cfg = RARITY_CONFIG[self.species.rarity]
+            wild_base_power = RARITY_POWER.get(self.species.rarity, 10)
+            wild_level = max(1, min(35, fighter_lvl + random.randint(-2, 3)))
+            wild_power = wild_base_power + wild_level * 3 + (4 if self.is_shiny else 0)
+
+            win_chance = 0.50 + (fighter_power - wild_power) * 0.025
+            win_chance = max(0.25, min(0.92, win_chance))
+            won = random.random() <= win_chance
+
+            base_xp = max(18, wild_base_power + wild_level * 4)
+            xp_gain = base_xp if won else max(8, base_xp // 3)
+
+            xp_res = add_pokemon_xp(
+                row_id=mon["id"],
+                guild_id=self.guild.id,
+                user_id=self.author_id,
+                xp_gain=xp_gain,
+                evolution_table=EVOLUTION_TABLE,
+            )
+
+            shiny_f = "✨ " if mon.get("is_shiny") else ""
+            shiny_w = "✨ " if self.is_shiny else ""
+
+            if xp_res:
+                new_name = xp_res["name"]
+                old_name = xp_res["old_name"]
+                new_lvl = xp_res["new_level"]
+                new_xp = xp_res["new_xp"]
+                next_xp = xp_res["next_xp"]
+                leveled_up = xp_res["leveled_up"]
+                evolved = xp_res["evolved"]
+                art_id = xp_res["pokedex_id"]
+            else:
+                new_name = mon["name"]
+                old_name = mon["name"]
+                new_lvl = fighter_lvl
+                new_xp = mon.get("poke_xp", 0) + xp_gain
+                next_xp = 40 * max(1, new_lvl)
+                leveled_up = False
+                evolved = False
+                art_id = mon["pokedex_id"]
+
+            progress_lines = [
+                f"⭐ **+{xp_gain} XP** para **{shiny_f}{new_name}** (`{new_xp}/{next_xp} XP` • **Nv. {new_lvl}**)"
+            ]
+            if leveled_up:
+                progress_lines.append(f"🆙 *¡Subió a **Nivel {new_lvl}**!*")
+            if evolved:
+                progress_lines.append(
+                    f"✨ **¡EVOLUCIÓN!** *{shiny_f}{old_name}* evolucionó en **{shiny_f}{new_name}**! 🎉"
+                )
+
+            asyncio.create_task(self.on_backup(self.guild, True))
+
+            if won:
+                embed = discord.Embed(
+                    title=f"⚔️ ¡VICTORIA DE {shiny_f}{new_name.upper()}! 🔥",
+                    description=(
+                        f"Tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*) derrotó a **{shiny_w}{self.species.name}** (*Nv. {wild_level}* | {wild_cfg['emoji']} {self.species.rarity}).\n\n"
+                        + "\n".join(progress_lines)
+                        + "\n\n*¡El Pokémon salvaje quedó debilitado! Podés intentar capturarlo con **+20% de probabilidad** o terminar.*"
+                    ),
+                    color=discord.Color.gold() if evolved else discord.Color.green(),
+                )
+                embed.set_image(url=get_artwork_url(art_id, bool(mon.get("is_shiny"))))
+                embed.set_thumbnail(url=get_artwork_url(self.species.pokedex_id, self.is_shiny))
+                embed.set_footer(text="Victini Bot • ¡Victoria! 🔥✌️")
+                next_view = PostBattleCatchView(
+                    guild=self.guild,
+                    author_id=self.author_id,
+                    species=self.species,
+                    is_shiny=self.is_shiny,
+                    pokeballs=self.pokeballs,
+                    on_backup=self.on_backup,
+                )
+                await interaction.response.edit_message(embed=embed, view=next_view)
+            else:
+                for item in self.children:
+                    item.disabled = True
+                embed = discord.Embed(
+                    title=f"💥 ¡{shiny_w}{self.species.name} fue demasiado fuerte!",
+                    description=(
+                        f"Tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*) cayó en combate ante **{shiny_w}{self.species.name}** (*Nv. {wild_level}*), pero igual aprendió de la batalla:\n\n"
+                        + "\n".join(progress_lines)
+                    ),
+                    color=discord.Color.orange(),
+                )
+                embed.set_thumbnail(url=get_artwork_url(art_id, bool(mon.get("is_shiny"))))
+                embed.set_footer(text="Victini dice: ¡Seguí entrenando para la revancha! ✌️")
+                await interaction.response.edit_message(embed=embed, view=self)
+
+        return callback
+
+    async def _back_cb(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("🔥 Este encuentro no es tuyo.", ephemeral=True)
+            return
+
+        cfg = RARITY_CONFIG[self.species.rarity]
+        shiny_text = "✨ **¡SHINY!** ✨\n" if self.is_shiny else ""
+        embed = discord.Embed(
+            title=f"🌿 ¡Un {self.species.name} salvaje apareció!",
+            description=(
+                f"{shiny_text}"
+                f"{cfg['emoji']} **Rareza:** {self.species.rarity}\n"
+                f"🔥 **Tipo:** {self.species.ptype}\n"
+                f"🎯 **Probabilidad de captura:** {int(cfg['catch_rate'] * 100)}%\n\n"
+                f"*¿Querés lanzar una Pokéball, pelear con tu equipo o huir?*"
+            ),
+            color=cfg["color"],
+        )
+        embed.set_image(url=get_artwork_url(self.species.pokedex_id, self.is_shiny))
+        embed.set_footer(text="Tenés 2 minutos para decidir • Victini Bot 🔥✌️")
+
+        encounter_view = WildEncounterView(
+            guild=self.guild,
+            author_id=self.author_id,
+            species=self.species,
+            is_shiny=self.is_shiny,
+            pokeballs=self.pokeballs,
+            on_backup=self.on_backup,
+        )
+        await interaction.response.edit_message(embed=embed, view=encounter_view)
+
+
+class WildEncounterView(discord.ui.View):
+    """Vista inicial cuando aparece un Pokémon salvaje: permite lanzar Pokéball, pelear o huir."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        author_id: int,
+        species: PokemonSpecies,
+        is_shiny: bool,
+        pokeballs: int,
+        on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+    ):
+        super().__init__(timeout=120)
+        self.guild = guild
+        self.author_id = author_id
+        self.species = species
+        self.is_shiny = is_shiny
+        self.pokeballs = pokeballs
         self.on_backup = on_backup
 
         self.throw_btn.label = f"🔴 ¡Lanzar Pokéball! (Tenés {pokeballs})"
@@ -677,6 +1004,43 @@ class WildEncounterView(discord.ui.View):
         embed.set_footer(text="Elegí con los botones de abajo • Victini Bot 🔥✌️")
         await interaction.response.edit_message(embed=embed, view=decision_view)
         asyncio.create_task(self.on_backup(self.guild, True))
+
+    @discord.ui.button(label="⚔️ ¡Pelear!", style=discord.ButtonStyle.primary)
+    async def fight_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "🔥 ¡No te robes el encuentro! Tirale `/catch` para buscar el tuyo.",
+                ephemeral=True,
+            )
+            return
+
+        team = get_pokemon_team(self.guild.id, self.author_id)
+        if not team:
+            await interaction.response.send_message(
+                "❌ Todavía no tenés ningún Pokémon en tu equipo para pelear. ¡Primero capturá uno con **🔴 ¡Lanzar Pokéball!**!",
+                ephemeral=True,
+            )
+            return
+
+        shiny_tag = "✨ " if self.is_shiny else ""
+        embed = discord.Embed(
+            title=f"⚔️ ¡Elegí tu Pokémon para pelear contra {shiny_tag}{self.species.name}!",
+            description="*Seleccioná a uno de tus compañeros abajo para combatir, ganar **XP**, subir de nivel y hasta **evolucionar**:*",
+            color=discord.Color.orange(),
+        )
+        embed.set_thumbnail(url=get_artwork_url(self.species.pokedex_id, self.is_shiny))
+        embed.set_footer(text="Victini Bot • Combate Pokémon 🔥✌️")
+
+        choose_view = ChooseFighterView(
+            guild=self.guild,
+            author_id=self.author_id,
+            species=self.species,
+            is_shiny=self.is_shiny,
+            pokeballs=self.pokeballs,
+            team=team,
+            on_backup=self.on_backup,
+        )
+        await interaction.response.edit_message(embed=embed, view=choose_view)
 
     @discord.ui.button(label="🏃 Huir", style=discord.ButtonStyle.secondary)
     async def flee_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
