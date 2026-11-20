@@ -741,6 +741,51 @@ class PostBattleCatchView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
+def _apply_exp_share(
+    guild_id: int,
+    user_id: int,
+    team: list[dict],
+    fighter_id: int,
+    main_xp_gain: int,
+) -> list[str]:
+    """
+    Si el entrenador tiene nivel >= 20 en el servidor, activa automáticamente el
+    Repartir Experiencia y reparte XP (50%, mín. 5) al resto del equipo.
+    """
+    trainer_level, _, _ = get_user_stats(guild_id, user_id)
+    if trainer_level < 20:
+        return []
+
+    others = [m for m in team if m["id"] != fighter_id]
+    if not others:
+        return []
+
+    share_xp = max(5, main_xp_gain // 2)
+    highlights: list[str] = []
+    for mate in others:
+        res = add_pokemon_xp(
+            row_id=mate["id"],
+            guild_id=guild_id,
+            user_id=user_id,
+            xp_gain=share_xp,
+            evolution_table=EVOLUTION_TABLE,
+        )
+        if not res:
+            continue
+        shiny_m = "✨ " if mate.get("is_shiny") else ""
+        if res["evolved"]:
+            highlights.append(
+                f"✨ *{shiny_m}{res['old_name']}* → **{shiny_m}{res['name']}** (**Nv. {res['new_level']}**)"
+            )
+        elif res["leveled_up"]:
+            highlights.append(f"🆙 **{shiny_m}{res['name']}** (**Nv. {res['new_level']}**)")
+
+    line = f"🎒 **Repartir Experiencia** *(Nv. {trainer_level}+)*: el resto del equipo sumó **+{share_xp} XP** c/u."
+    if highlights:
+        line += " " + " • ".join(highlights)
+    return [line]
+
+
 class ChooseFighterView(discord.ui.View):
     """Permite elegir un Pokémon del equipo para pelear contra el encuentro salvaje."""
 
@@ -842,6 +887,9 @@ class ChooseFighterView(discord.ui.View):
                 progress_lines.append(
                     f"✨ **¡EVOLUCIÓN!** *{shiny_f}{old_name}* evolucionó en **{shiny_f}{new_name}**! 🎉"
                 )
+            progress_lines.extend(
+                _apply_exp_share(self.guild.id, self.author_id, self.team, mon["id"], xp_gain)
+            )
 
             asyncio.create_task(self.on_backup(self.guild, True))
 
@@ -1114,16 +1162,16 @@ class TrainerOpponent:
 
 
 RANDOM_TRAINERS: List[TrainerOpponent] = [
-    TrainerOpponent("Tito", "Dominguero", 19, "Rattata", "Común", "Normal", 5, "¡Mis shorts son súper cómodos y fáciles de llevar!", 45, 14, 0.45, 1),
-    TrainerOpponent("Mateo", "Pescador", 129, "Magikarp", "Común", "Agua", 7, "¡Picó algo enorme... bueno, casi! ¡A pelear!", 50, 15, 0.45, 1),
-    TrainerOpponent("Lucas", "Cazabichos", 123, "Scyther", "Raro", "Bicho/Volador", 11, "¡Mis Pokémon bicho son los más rápidos del Bosque Verde!", 65, 20, 0.55, 1),
-    TrainerOpponent("Secuaz Rocket", "Team Rocket", 52, "Meowth", "Raro", "Normal", 13, "¡Entregá a tus Pokémon o preparate para el combate!", 75, 22, 0.60, 1),
-    TrainerOpponent("Jessie y James", "Dúo del Team Rocket", 24, "Arbok", "Raro", "Veneno", 16, "¡Para proteger al mundo de la devastación, vamos a derrotarte!", 90, 28, 0.65, 1),
-    TrainerOpponent("Enfermera Joy", "Desafío Amistoso", 113, "Chansey", "Raro", "Normal", 18, "¡Hasta en el Centro Pokémon entrenamos duro todos los días!", 95, 30, 0.65, 1),
-    TrainerOpponent("Gary Oak", "Rival Clásico", 197, "Umbreon", "Épico", "Siniestro", 24, "¡Huelo a novato por acá! ¡Mostrame qué tan fuerte sos!", 135, 42, 0.75, 2),
-    TrainerOpponent("Ash Ketchum", "Entrenador de Pueblo Paleta", 25, "Pikachu", "Épico", "Eléctrico", 27, "¡Pikachu, yo te elijo! ¡Vamos a dar lo mejor en esta batalla!", 150, 48, 0.80, 2),
-    TrainerOpponent("N", "Rey del Equipo Plasma", 571, "Zoroark", "Épico", "Siniestro", 30, "¿Podés escuchar el corazón de tus Pokémon en medio del combate?", 170, 55, 0.80, 2),
-    TrainerOpponent("Red", "Entrenador Legendario", 6, "Charizard", "Legendario", "Fuego/Volador", 36, "...", 220, 70, 0.90, 2),
+    TrainerOpponent("Tito", "Dominguero", 19, "Rattata", "Común", "Normal", 5, "¡Mis shorts son súper cómodos y fáciles de llevar!", 45, 14, 0.50, 1),
+    TrainerOpponent("Mateo", "Pescador", 129, "Magikarp", "Común", "Agua", 7, "¡Picó algo enorme... bueno, casi! ¡A pelear!", 50, 15, 0.50, 1),
+    TrainerOpponent("Lucas", "Cazabichos", 123, "Scyther", "Raro", "Bicho/Volador", 11, "¡Mis Pokémon bicho son los más rápidos del Bosque Verde!", 65, 20, 0.50, 1),
+    TrainerOpponent("Secuaz Rocket", "Team Rocket", 52, "Meowth", "Raro", "Normal", 13, "¡Entregá a tus Pokémon o preparate para el combate!", 75, 22, 0.50, 1),
+    TrainerOpponent("Jessie y James", "Dúo del Team Rocket", 24, "Arbok", "Raro", "Veneno", 16, "¡Para proteger al mundo de la devastación, vamos a derrotarte!", 90, 28, 0.50, 1),
+    TrainerOpponent("Enfermera Joy", "Desafío Amistoso", 113, "Chansey", "Raro", "Normal", 18, "¡Hasta en el Centro Pokémon entrenamos duro todos los días!", 95, 30, 0.50, 1),
+    TrainerOpponent("Gary Oak", "Rival Clásico", 197, "Umbreon", "Épico", "Siniestro", 24, "¡Huelo a novato por acá! ¡Mostrame qué tan fuerte sos!", 135, 42, 0.50, 1),
+    TrainerOpponent("Ash Ketchum", "Entrenador de Pueblo Paleta", 25, "Pikachu", "Épico", "Eléctrico", 27, "¡Pikachu, yo te elijo! ¡Vamos a dar lo mejor en esta batalla!", 150, 48, 0.50, 1),
+    TrainerOpponent("N", "Rey del Equipo Plasma", 571, "Zoroark", "Épico", "Siniestro", 30, "¿Podés escuchar el corazón de tus Pokémon en medio del combate?", 170, 55, 0.50, 1),
+    TrainerOpponent("Red", "Entrenador Legendario", 6, "Charizard", "Legendario", "Fuego/Volador", 36, "...", 220, 70, 0.50, 1),
 ]
 
 GYM_LEADERS: List[TrainerOpponent] = [
@@ -1243,6 +1291,9 @@ class TrainerBattleView(discord.ui.View):
                 reward_lines.append(
                     f"✨ **¡EVOLUCIÓN!** *{shiny_f}{old_name}* evolucionó en **{shiny_f}{new_name}**! 🎉"
                 )
+            reward_lines.extend(
+                _apply_exp_share(self.guild.id, self.author_id, self.team, mon["id"], xp_gain)
+            )
 
             pokeballs_won = 0
             if won:
@@ -1386,7 +1437,7 @@ def setup_pokemon_commands(
                 f"> *\"{trainer.quote}\"*\n\n"
                 f"🐾 **Pokémon rival:** **{trainer.pokemon_name}** *(Nivel adaptado al Pokémon que elijas)*\n"
                 f"{cfg['emoji']} **Rareza:** {trainer.rarity} | **Tipo:** {trainer.ptype}\n"
-                f"🎁 **Recompensa si ganás:** **+{trainer.xp_win} XP** y **{int(trainer.pokeball_chance * 100)}%** de chance de **+{trainer.pokeball_amount} Pokéball{'s' if trainer.pokeball_amount > 1 else ''}**\n"
+                f"🎁 **Recompensa si ganás:** **+{trainer.xp_win} XP** y **50%** de chance de **+1 Pokéball**\n"
                 f"📉 **Si perdés:** **+{trainer.xp_loss} XP** de entrenamiento\n\n"
                 f"*Elegí qué Pokémon de tu equipo sale a pelear:*"
             ),
