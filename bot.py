@@ -285,11 +285,20 @@ async def notify_level_up(guild: discord.Guild, member: discord.Member, new_leve
     level_channel = find_target_channel(guild, LEVEL_CHANNEL_NAME)
     if level_channel is not None:
         pokeballs = get_pokeballs(guild.id, member.id)
-        level_up_msg = (
-            f"{member.mention} ha subido al **nivel {new_level}**. "
-            f"*Espero que haya sido de forma legal* 👀 o **mis llamas actuarán rápidamente con severas consecuencias** 🔥😈\n"
-            f"🎱 ¡Recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** para usar en `/catch`)*"
-        )
+        if new_level == 20:
+            level_up_msg = (
+                f"🎉🔥 **¡HITO DESBLOQUEADO, {member.mention}!** 🔥🎉\n"
+                f"¡Llegaste al **Nivel 20** en **SNAP!** y *Victini te entrega un objeto legendario*: "
+                f"🎒 **¡Desbloqueaste el *Repartir Experiencia* para utilizar en `CATCH`!**\n"
+                f"*A partir de ahora, en cada combate (`/catch`, `/battle`, `/gymchallenge` y `/pokemonleague`), **todos tus Pokémon del equipo acumularán XP automáticamente**, no solo el que elijas para luchar!* ⚡✌️\n"
+                f"🎱 ¡Además recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** disponibles)*"
+            )
+        else:
+            level_up_msg = (
+                f"{member.mention} ha subido al **nivel {new_level}**. "
+                f"*Espero que haya sido de forma legal* 👀 o **mis llamas actuarán rápidamente con severas consecuencias** 🔥😈\n"
+                f"🎱 ¡Recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** para usar en `/catch`)*"
+            )
         await level_channel.send(level_up_msg)
     else:
         print(
