@@ -1193,8 +1193,13 @@ class TrainerBattleView(discord.ui.View):
                 return
 
             fighter_lvl = int(mon.get("poke_level", 1))
+            opp_level = (
+                max(1, fighter_lvl + random.randint(-1, 2))
+                if self.mode == "battle"
+                else self.opponent.level
+            )
             fighter_power = RARITY_POWER.get(mon["rarity"], 10) + fighter_lvl * 3 + (5 if mon.get("is_shiny") else 0)
-            opp_power = RARITY_POWER.get(self.opponent.rarity, 12) + self.opponent.level * 3
+            opp_power = RARITY_POWER.get(self.opponent.rarity, 12) + opp_level * 3
 
             win_chance = 0.52 + (fighter_power - opp_power) * 0.025
             win_chance = max(0.20, min(0.92, win_chance))
@@ -1306,7 +1311,7 @@ class TrainerBattleView(discord.ui.View):
                 embed = discord.Embed(
                     title=f"🏆 ¡VICTORIA CONTRA {self.opponent.name.upper()}! 🔥",
                     description=(
-                        f"Tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*) venció al **{self.opponent.pokemon_name}** (*Nv. {self.opponent.level}*) de **{self.opponent.name}** (*{self.opponent.title}*).\n\n"
+                        f"Tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*) venció al **{self.opponent.pokemon_name}** (*Nv. {opp_level}*) de **{self.opponent.name}** (*{self.opponent.title}*).\n\n"
                         + "\n".join(reward_lines)
                     ),
                     color=discord.Color.gold() if (evolved or self.mode in ("gym", "league")) else discord.Color.green(),
@@ -1315,7 +1320,7 @@ class TrainerBattleView(discord.ui.View):
                 embed = discord.Embed(
                     title=f"💥 ¡DERROTA ANTE {self.opponent.name.upper()}!",
                     description=(
-                        f"El **{self.opponent.pokemon_name}** (*Nv. {self.opponent.level}*) de **{self.opponent.name}** (*{self.opponent.title}*) superó a tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*).\n\n"
+                        f"El **{self.opponent.pokemon_name}** (*Nv. {opp_level}*) de **{self.opponent.name}** (*{self.opponent.title}*) superó a tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*).\n\n"
                         + "\n".join(reward_lines)
                         + "\n\n*¡Igual sumaste experiencia de entrenamiento! Subí de nivel y volvé por la revancha.*"
                     ),
@@ -1379,7 +1384,7 @@ def setup_pokemon_commands(
             title=f"⚔️ ¡{trainer.name} ({trainer.title}) te desafía a combatir! 🔥",
             description=(
                 f"> *\"{trainer.quote}\"*\n\n"
-                f"🐾 **Pokémon rival:** **{trainer.pokemon_name}** (*Nv. {trainer.level}*)\n"
+                f"🐾 **Pokémon rival:** **{trainer.pokemon_name}** *(Nivel adaptado al Pokémon que elijas)*\n"
                 f"{cfg['emoji']} **Rareza:** {trainer.rarity} | **Tipo:** {trainer.ptype}\n"
                 f"🎁 **Recompensa si ganás:** **+{trainer.xp_win} XP** y **{int(trainer.pokeball_chance * 100)}%** de chance de **+{trainer.pokeball_amount} Pokéball{'s' if trainer.pokeball_amount > 1 else ''}**\n"
                 f"📉 **Si perdés:** **+{trainer.xp_loss} XP** de entrenamiento\n\n"
