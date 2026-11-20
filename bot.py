@@ -29,6 +29,7 @@ from database import (
 from music import setup_music_commands
 from pokemon_game import setup_pokemon_commands, build_welcome_card_png
 from promo_cards import build_entreturnos_card_png, build_snap_card_png
+from tcg_booster import BoosterPackView
 
 # Forzar salida sin buffer en Render para que todos los print() aparezcan al instante en los Logs
 sys.stdout.reconfigure(line_buffering=True)
@@ -281,7 +282,7 @@ async def sync_levels_backup(guild: discord.Guild, force: bool = False) -> None:
 
 
 async def notify_level_up(guild: discord.Guild, member: discord.Member, new_level: int) -> None:
-    """Envía el aviso oficial de subida de nivel únicamente por 🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀."""
+    """Envía el aviso oficial de subida de nivel + Booster Pack Misterioso únicamente por 🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀."""
     level_channel = find_target_channel(guild, LEVEL_CHANNEL_NAME)
     if level_channel is not None:
         pokeballs = get_pokeballs(guild.id, member.id)
@@ -291,15 +292,24 @@ async def notify_level_up(guild: discord.Guild, member: discord.Member, new_leve
                 f"¡Llegaste al **Nivel 20** en **SNAP!** y *Victini te entrega un objeto legendario*: "
                 f"🎒 **¡Desbloqueaste el *Repartir Experiencia* para utilizar en `CATCH`!**\n"
                 f"*A partir de ahora, en cada combate (`/catch`, `/battle`, `/gymchallenge` y `/pokemonleague`), **todos tus Pokémon del equipo acumularán XP automáticamente**, no solo el que elijas para luchar!* ⚡✌️\n"
-                f"🎱 ¡Además recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** disponibles)*"
+                f"🎱 ¡Además recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** disponibles)*\n\n"
+                f"🎁 **¡Y podés abrir un *Booster Pack Misterioso* de 10 cartas reales de Pokémon TCG!** 🎴✨"
             )
         else:
             level_up_msg = (
-                f"{member.mention} ha subido al **nivel {new_level}**. "
-                f"*Espero que haya sido de forma legal* 👀 o **mis llamas actuarán rápidamente con severas consecuencias** 🔥😈\n"
-                f"🎱 ¡Recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** para usar en `/catch`)*"
+                f"🎉 {member.mention} ha subido al **nivel {new_level}**, *¡felicitaciones!* 🔥 "
+                f"*Espero que haya sido de forma legal* 👀 o **mis llamas actuarán rápidamente con severas consecuencias** 😈\n"
+                f"🎱 ¡Recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** para usar en `/catch`)*\n\n"
+                f"🎁 **¡Podés abrir un *Booster Pack Misterioso* de 10 cartas reales de Pokémon TCG!** 🎴✨"
             )
-        await level_channel.send(level_up_msg)
+        view = BoosterPackView(
+            guild_id=guild.id,
+            author_id=member.id,
+            author_name=member.display_name,
+            new_level=new_level,
+            on_backup=sync_levels_backup,
+        )
+        await level_channel.send(level_up_msg, view=view)
     else:
         print(
             f"⚠️ {member} subió a nivel {new_level}, pero no se encontró el canal '{LEVEL_CHANNEL_NAME}'.",
