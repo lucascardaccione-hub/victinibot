@@ -81,6 +81,21 @@ def init_db() -> None:
             cursor.execute("ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS gym_badges INTEGER NOT NULL DEFAULT 0")
             cursor.execute("ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS league_stage INTEGER NOT NULL DEFAULT 0")
             cursor.execute("ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS league_wins INTEGER NOT NULL DEFAULT 0")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_tcg_cards (
+                    id SERIAL PRIMARY KEY,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    card_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    set_name TEXT NOT NULL,
+                    rarity TEXT NOT NULL,
+                    image_url TEXT NOT NULL,
+                    pulled_at DOUBLE PRECISION NOT NULL DEFAULT 0
+                )
+                """
+            )
         else:
             cursor.execute(
                 """
@@ -132,6 +147,22 @@ def init_db() -> None:
                 cursor.execute("ALTER TABLE user_pokemon ADD COLUMN poke_level INTEGER NOT NULL DEFAULT 1")
             if "poke_xp" not in p_cols:
                 cursor.execute("ALTER TABLE user_pokemon ADD COLUMN poke_xp INTEGER NOT NULL DEFAULT 0")
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_tcg_cards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    card_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    set_name TEXT NOT NULL,
+                    rarity TEXT NOT NULL,
+                    image_url TEXT NOT NULL,
+                    pulled_at REAL NOT NULL DEFAULT 0
+                )
+                """
+            )
         conn.commit()
 
 
@@ -639,20 +670,130 @@ def get_global_web_leaderboard(limit: int = 50) -> List[dict]:
                 }
             )
 
+        cursor.execute(
+            _sql(
+                """
+                SELECT guild_id, user_id, COUNT(*), COUNT(DISTINCT card_id)
+                FROM user_tcg_cards
+                GROUP BY guild_id, user_id
+                """
+            )
+        )
+        tcg_counts_map: dict[tuple[int, int], tuple[int, int]] = {}
+        for gid, uid, total_c, uniq_c in cursor.fetchall():
+            tcg_counts_map[(gid, uid)] = (int(total_c), int(uniq_c))
+
         result = []
         for idx, (gid, uid, username, level, xp, pokeballs) in enumerate(rows, start=1):
+            tcg_total, tcg_unique = tcg_counts_map.get((gid, uid), (0, 0))
             result.append(
                 {
                     "rank": idx,
+                    "guild_id": str(gid),
+                    "user_id": str(uid),
                     "username": username,
                     "level": level,
                     "xp": xp,
                     "next_xp": xp_for_next_level(level),
                     "pokeballs": pokeballs,
                     "team": teams_map.get((gid, uid), [])[:6],
+                    "tcg_total": tcg_total,
+                    "tcg_unique": tcg_unique,
                 }
             )
         return result
+
+
+TCG_RARITY_ORDER = {
+    "Secreta / SIR": 6,
+    "Ilustración Rara": 5,
+    "Ultra Rara": 4,
+    "Rara": 3,
+    "Infrecuente": 2,
+    "Común": 1,
+}
+
+
+def add_tcg_cards(guild_id: int, user_id: int, cards: List[dict], pulled_at: float) -> int:
+    """Guarda las cartas Pokémon TCG obtenidas en un Booster Pack en la colección del usuario."""
+    if not cards:
+        return 0
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        for c in cards:
+            cursor.execute(
+                _sql(
+                    """
+                    INSERT INTO user_tcg_cards (guild_id, user_id, card_id, name, set_name, rarity, image_url, pulled_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """
+                ),
+                (
+                    guild_id,
+                    user_id,
+                    str(c["card_id"]),
+                    str(c["name"]),
+                    str(c["set_name"]),
+                    str(c["rarity"]),
+                    str(c["image_url"]),
+                    float(pulled_at),
+                ),
+            )
+        conn.commit()
+    return len(cards)
+
+
+def get_user_tcg_cards(guild_id: int, user_id: int) -> dict:
+    """Retorna la colección de cartas Pokémon TCG de un entrenador agrupada por carta con cantidades."""
+    init_db()
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("SELECT username, level FROM user_levels WHERE guild_id = ? AND user_id = ?"),
+            (guild_id, user_id),
+        )
+        u_row = cursor.fetchone()
+        username = str(u_row[0]) if u_row else "Entrenador"
+        level = int(u_row[1]) if u_row else 1
+
+        cursor.execute(
+            _sql(
+                """
+                SELECT card_id, name, set_name, rarity, image_url, COUNT(*) as qty, MAX(pulled_at) as last_pulled
+                FROM user_tcg_cards
+                WHERE guild_id = ? AND user_id = ?
+                GROUP BY card_id, name, set_name, rarity, image_url
+                """
+            ),
+            (guild_id, user_id),
+        )
+        raw_rows = cursor.fetchall()
+
+        cards = [
+            {
+                "card_id": r[0],
+                "name": r[1],
+                "set_name": r[2],
+                "rarity": r[3],
+                "image_url": r[4],
+                "qty": int(r[5]),
+                "last_pulled": float(r[6] or 0),
+            }
+            for r in raw_rows
+        ]
+        cards.sort(
+            key=lambda c: (-TCG_RARITY_ORDER.get(c["rarity"], 0), -c["qty"], c["name"])
+        )
+        total_cards = sum(c["qty"] for c in cards)
+        return {
+            "guild_id": str(guild_id),
+            "user_id": str(user_id),
+            "username": username,
+            "level": level,
+            "total_cards": total_cards,
+            "unique_cards": len(cards),
+            "cards": cards,
+        }
 
 
 def export_guild_levels(guild_id: int) -> dict:
