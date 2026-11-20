@@ -806,9 +806,16 @@ async def chivo_command(
         return
 
     await interaction.response.defer()
-    choice_val = mensaje.value if mensaje is not None else None
-    text, card_file = await asyncio.to_thread(build_promo_payload, choice_val)
-    await interaction.followup.send(content=text, file=card_file)
+    try:
+        choice_val = mensaje.value if mensaje is not None else None
+        text, card_file = await asyncio.to_thread(build_promo_payload, choice_val)
+        await interaction.followup.send(content=text, file=card_file)
+    except Exception as e:
+        print(f"⚠️ Error ejecutando /chivo: {e}", flush=True)
+        await interaction.followup.send(
+            "❌ Ocurrió un error al generar la tarjeta del chivo. Revisá los logs.",
+            ephemeral=True,
+        )
 
 
 # ==========================================
