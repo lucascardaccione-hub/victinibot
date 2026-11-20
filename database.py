@@ -70,10 +70,14 @@ def init_db() -> None:
                     rarity TEXT NOT NULL,
                     ptype TEXT NOT NULL,
                     is_shiny INTEGER NOT NULL DEFAULT 0,
-                    caught_at DOUBLE PRECISION NOT NULL DEFAULT 0
+                    caught_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    poke_level INTEGER NOT NULL DEFAULT 1,
+                    poke_xp INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            cursor.execute("ALTER TABLE user_pokemon ADD COLUMN IF NOT EXISTS poke_level INTEGER NOT NULL DEFAULT 1")
+            cursor.execute("ALTER TABLE user_pokemon ADD COLUMN IF NOT EXISTS poke_xp INTEGER NOT NULL DEFAULT 0")
         else:
             cursor.execute(
                 """
@@ -107,10 +111,18 @@ def init_db() -> None:
                     rarity TEXT NOT NULL,
                     ptype TEXT NOT NULL,
                     is_shiny INTEGER NOT NULL DEFAULT 0,
-                    caught_at REAL NOT NULL DEFAULT 0
+                    caught_at REAL NOT NULL DEFAULT 0,
+                    poke_level INTEGER NOT NULL DEFAULT 1,
+                    poke_xp INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            cursor.execute("PRAGMA table_info(user_pokemon)")
+            p_cols = [col[1] for col in cursor.fetchall()]
+            if "poke_level" not in p_cols:
+                cursor.execute("ALTER TABLE user_pokemon ADD COLUMN poke_level INTEGER NOT NULL DEFAULT 1")
+            if "poke_xp" not in p_cols:
+                cursor.execute("ALTER TABLE user_pokemon ADD COLUMN poke_xp INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
 
@@ -257,13 +269,13 @@ def consume_pokeball(guild_id: int, user_id: int) -> Tuple[bool, int]:
 
 
 def get_pokemon_team(guild_id: int, user_id: int) -> List[dict]:
-    """Retorna la lista de Pokémon (máximo 6) en el equipo del usuario."""
+    """Retorna la lista de Pokémon (máximo 6) en el equipo del usuario con su nivel y XP."""
     with closing(_get_conn()) as conn:
         cursor = conn.cursor()
         cursor.execute(
             _sql(
                 """
-                SELECT id, pokedex_id, name, rarity, ptype, is_shiny, caught_at
+                SELECT id, pokedex_id, name, rarity, ptype, is_shiny, caught_at, poke_level, poke_xp
                 FROM user_pokemon
                 WHERE guild_id = ? AND user_id = ?
                 ORDER BY id ASC
@@ -280,9 +292,96 @@ def get_pokemon_team(guild_id: int, user_id: int) -> List[dict]:
                 "ptype": r[4],
                 "is_shiny": bool(r[5]),
                 "caught_at": r[6],
+                "poke_level": int(r[7] if r[7] is not None else 1),
+                "poke_xp": int(r[8] if r[8] is not None else 0),
             }
             for r in cursor.fetchall()
         ]
+
+
+def poke_xp_for_next_level(poke_level: int) -> int:
+    """Experiencia necesaria para que un Pokémon suba al siguiente nivel."""
+    return 40 * max(1, poke_level)
+
+
+def add_pokemon_xp(
+    row_id: int,
+    guild_id: int,
+    user_id: int,
+    xp_gain: int,
+    evolution_table: Optional[dict] = None,
+) -> Optional[dict]:
+    """
+    Suma XP a un Pokémon del equipo tras un combate, sube su nivel si corresponde
+    y verifica si alcanza el nivel necesario para evolucionar (incluso múltiples etapas).
+    Retorna un dict con el resultado o None si no existe.
+    """
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql(
+                """
+                SELECT pokedex_id, name, rarity, ptype, is_shiny, poke_level, poke_xp
+                FROM user_pokemon
+                WHERE id = ? AND guild_id = ? AND user_id = ?
+                """
+            ),
+            (row_id, guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        pid, name, rarity, ptype, is_shiny, p_level, p_xp = row
+        old_level = int(p_level or 1)
+        p_level = old_level
+        p_xp = int(p_xp or 0) + xp_gain
+
+        while p_xp >= poke_xp_for_next_level(p_level):
+            p_xp -= poke_xp_for_next_level(p_level)
+            p_level += 1
+
+        old_name = name
+        evolved = False
+        if evolution_table:
+            while pid in evolution_table:
+                evo = evolution_table[pid]
+                if p_level >= evo["min_level"]:
+                    pid = evo["to_id"]
+                    name = evo["to_name"]
+                    ptype = evo["to_type"]
+                    if evo.get("to_rarity"):
+                        rarity = evo["to_rarity"]
+                    evolved = True
+                else:
+                    break
+
+        cursor.execute(
+            _sql(
+                """
+                UPDATE user_pokemon
+                SET pokedex_id = ?, name = ?, rarity = ?, ptype = ?, poke_level = ?, poke_xp = ?
+                WHERE id = ? AND guild_id = ? AND user_id = ?
+                """
+            ),
+            (pid, name, rarity, ptype, p_level, p_xp, row_id, guild_id, user_id),
+        )
+        conn.commit()
+        return {
+            "id": row_id,
+            "pokedex_id": pid,
+            "name": name,
+            "old_name": old_name,
+            "rarity": rarity,
+            "ptype": ptype,
+            "is_shiny": bool(is_shiny),
+            "old_level": old_level,
+            "new_level": p_level,
+            "new_xp": p_xp,
+            "next_xp": poke_xp_for_next_level(p_level),
+            "leveled_up": p_level > old_level,
+            "evolved": evolved,
+        }
 
 
 def add_pokemon_to_team(
@@ -404,20 +503,21 @@ def get_global_web_leaderboard(limit: int = 50) -> List[dict]:
         cursor.execute(
             _sql(
                 """
-                SELECT guild_id, user_id, pokedex_id, name, rarity, is_shiny
+                SELECT guild_id, user_id, pokedex_id, name, rarity, is_shiny, poke_level
                 FROM user_pokemon
                 ORDER BY id ASC
                 """
             )
         )
         teams_map: dict[tuple[int, int], List[dict]] = {}
-        for gid, uid, pid, pname, rarity, is_shiny in cursor.fetchall():
+        for gid, uid, pid, pname, rarity, is_shiny, p_level in cursor.fetchall():
             teams_map.setdefault((gid, uid), []).append(
                 {
                     "pokedex_id": pid,
                     "name": pname,
                     "rarity": rarity,
                     "is_shiny": bool(is_shiny),
+                    "poke_level": int(p_level if p_level is not None else 1),
                 }
             )
 
