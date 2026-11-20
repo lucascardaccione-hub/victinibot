@@ -3,7 +3,7 @@ import time
 import urllib.request
 from threading import Thread
 from flask import Flask, jsonify
-from database import get_global_web_leaderboard
+from database import get_global_web_leaderboard, get_user_tcg_cards
 
 app = Flask("")
 
@@ -25,6 +25,213 @@ def health():
 @app.route("/api/leaderboard")
 def api_leaderboard():
     return jsonify(get_global_web_leaderboard(limit=50))
+
+
+@app.route("/api/coleccion/<int:guild_id>/<int:user_id>")
+def api_coleccion(guild_id: int, user_id: int):
+    return jsonify(get_user_tcg_cards(guild_id, user_id))
+
+
+@app.route("/coleccion/<int:guild_id>/<int:user_id>")
+def coleccion_page(guild_id: int, user_id: int):
+    return f"""
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <title>Colección Pokémon TCG • SNAP!</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            :root {{
+                --bg: #0f1020;
+                --card: #191b33;
+                --accent: #ff9f1c;
+                --border: #ff6b35;
+                --text: #f4f4f9;
+            }}
+            body {{
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: radial-gradient(circle at top, #1f1b3a 0%, #0f1020 75%);
+                color: var(--text);
+                margin: 0;
+                padding: 20px;
+                min-height: 100vh;
+            }}
+            .wrap {{
+                width: 1120px;
+                max-width: 100%;
+                margin: 0 auto;
+            }}
+            .topbar {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 12px;
+                margin-bottom: 18px;
+            }}
+            .back-btn {{
+                display: inline-block;
+                padding: 10px 18px;
+                background: #2b2e52;
+                border: 1px solid var(--border);
+                color: #fff;
+                text-decoration: none;
+                border-radius: 8px;
+                font-weight: bold;
+            }}
+            .back-btn:hover {{ background: #363a66; }}
+            .stats {{
+                background: var(--card);
+                border: 2px solid rgba(255, 107, 53, 0.35);
+                border-radius: 14px;
+                padding: 18px 22px;
+                margin-bottom: 18px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 12px;
+            }}
+            .filters {{
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+                margin-bottom: 18px;
+            }}
+            .filter-btn {{
+                padding: 8px 14px;
+                border-radius: 999px;
+                border: 1px solid rgba(255, 159, 28, 0.45);
+                background: #191b33;
+                color: #f4f4f9;
+                cursor: pointer;
+                font-weight: bold;
+                font-size: 13px;
+            }}
+            .filter-btn.active {{
+                background: linear-gradient(135deg, #ff6b35, #e71d36);
+                border-color: transparent;
+            }}
+            .grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(195px, 1fr));
+                gap: 16px;
+            }}
+            .tcg-card {{
+                background: var(--card);
+                border: 2px solid rgba(255, 255, 255, 0.12);
+                border-radius: 12px;
+                padding: 10px;
+                text-align: center;
+                position: relative;
+                transition: transform 0.15s;
+            }}
+            .tcg-card:hover {{ transform: translateY(-4px); }}
+            .tcg-card img {{
+                width: 100%;
+                border-radius: 8px;
+                display: block;
+            }}
+            .qty-badge {{
+                position: absolute;
+                top: 16px;
+                right: 16px;
+                background: rgba(15, 16, 32, 0.9);
+                border: 1px solid #ff9f1c;
+                color: #ff9f1c;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 3px 8px;
+                border-radius: 999px;
+            }}
+            .card-title {{
+                margin: 8px 0 3px;
+                font-weight: bold;
+                font-size: 14px;
+            }}
+            .card-meta {{
+                font-size: 12px;
+                color: #b8b8d1;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <div class="topbar">
+                <a class="back-btn" href="/">⬅️ Volver al Ranking de SNAP!</a>
+                <h2 style="margin:0; color:#ff9f1c;">🃏 Colección Pokémon TCG</h2>
+            </div>
+            <div class="stats" id="statsBox">Cargando colección del entrenador...</div>
+            <div class="filters" id="filterBar"></div>
+            <div class="grid" id="cardsGrid"></div>
+        </div>
+        <script>
+            let allCards = [];
+            let currentFilter = 'Todas';
+            const rarityColors = {{
+                'Secreta / SIR': '#facc15',
+                'Ilustración Rara': '#fb923c',
+                'Ultra Rara': '#a855f7',
+                'Rara': '#3b82f6',
+                'Infrecuente': '#10b981',
+                'Común': '#9ca3af'
+            }};
+
+            function renderGrid() {{
+                const grid = document.getElementById('cardsGrid');
+                const list = currentFilter === 'Todas'
+                    ? allCards
+                    : allCards.filter(c => c.rarity === currentFilter);
+                if (!list.length) {{
+                    grid.innerHTML = '<p style="color:#aaa;">Todavía no hay cartas en esta categoría.</p>';
+                    return;
+                }}
+                grid.innerHTML = list.map(c => {{
+                    const col = rarityColors[c.rarity] || '#9ca3af';
+                    const qty = c.qty > 1 ? `<div class="qty-badge">x${{c.qty}}</div>` : '';
+                    return `<div class="tcg-card" style="border-color:${{col}};">
+                        ${{qty}}
+                        <a href="${{c.image_url}}" target="_blank" rel="noopener">
+                            <img src="${{c.image_url}}" alt="${{c.name}}" loading="lazy">
+                        </a>
+                        <div class="card-title">${{c.name}}</div>
+                        <div class="card-meta" style="color:${{col}}; font-weight:bold;">${{c.rarity}}</div>
+                        <div class="card-meta">${{c.set_name}}</div>
+                    </div>`;
+                }}).join('');
+            }}
+
+            async function loadCollection() {{
+                const res = await fetch('/api/coleccion/{guild_id}/{user_id}');
+                const data = await res.json();
+                allCards = data.cards || [];
+                document.getElementById('statsBox').innerHTML = `
+                    <div>
+                        <div style="font-size:20px; font-weight:bold; color:#ff9f1c;">${{data.username}} <span style="font-size:14px; color:#ccc;">(Nv. ${{data.level}})</span></div>
+                        <div style="font-size:13px; color:#b8b8d1;">Cartas obtenidas abriendo Mystery Booster Packs al subir de nivel 🔥</div>
+                    </div>
+                    <div style="font-size:15px;">
+                        🃏 <b>${{data.total_cards}}</b> cartas totales &nbsp;|&nbsp; ✨ <b>${{data.unique_cards}}</b> únicas
+                    </div>
+                `;
+                const tiers = ['Todas', 'Secreta / SIR', 'Ilustración Rara', 'Ultra Rara', 'Rara', 'Infrecuente', 'Común'];
+                document.getElementById('filterBar').innerHTML = tiers.map(t =>
+                    `<button class="filter-btn ${{t === currentFilter ? 'active' : ''}}" onclick="setFilter('${{t}}')">${{t}}</button>`
+                ).join('');
+                renderGrid();
+            }}
+
+            function setFilter(t) {{
+                currentFilter = t;
+                loadCollection();
+            }}
+
+            loadCollection();
+        </script>
+    </body>
+    </html>
+    """
 
 
 @app.route("/")
@@ -197,7 +404,7 @@ def home():
                         return;
                     }
                     const medals = {1: '🥇', 2: '🥈', 3: '🥉'};
-                    let html = '<div style="overflow-x:auto;"><table><thead><tr><th>Pos</th><th>Usuario</th><th>Nivel</th><th>Experiencia</th><th>Pokéballs</th><th>Equipo Pokémon</th></tr></thead><tbody>';
+                    let html = '<div style="overflow-x:auto;"><table><thead><tr><th>Pos</th><th>Usuario</th><th>Nivel</th><th>Experiencia</th><th>Pokéballs</th><th>Equipo Pokémon</th><th>Colección TCG</th></tr></thead><tbody>';
                     for (const row of data) {
                         const pos = medals[row.rank] || ('#' + row.rank);
                         const pct = Math.min(100, Math.round((row.xp / row.next_xp) * 100));
@@ -217,6 +424,10 @@ def home():
                             }
                             teamHtml += '</div>';
                         }
+                        const tcgTotal = row.tcg_total ?? 0;
+                        const tcgUnique = row.tcg_unique ?? 0;
+                        const colUrl = `/coleccion/${row.guild_id}/${row.user_id}`;
+                        const tcgHtml = `<a href="${colUrl}" style="display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:8px; background:#23264a; border:1px solid rgba(255,159,28,0.45); color:#ffcf70; text-decoration:none; font-size:12px; font-weight:bold; white-space:nowrap;">🃏 ${tcgTotal} (${tcgUnique}) • Ver colección →</a>`;
                         html += `<tr>
                             <td><b>${pos}</b></td>
                             <td><b>${row.username}</b></td>
@@ -227,6 +438,7 @@ def home():
                             </td>
                             <td><span style="font-weight:bold; color:#ff6b35;">🎱 ${row.pokeballs ?? 0}</span></td>
                             <td>${teamHtml}</td>
+                            <td>${tcgHtml}</td>
                         </tr>`;
                     }
                     html += '</tbody></table></div>';
