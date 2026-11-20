@@ -78,6 +78,9 @@ def init_db() -> None:
             )
             cursor.execute("ALTER TABLE user_pokemon ADD COLUMN IF NOT EXISTS poke_level INTEGER NOT NULL DEFAULT 1")
             cursor.execute("ALTER TABLE user_pokemon ADD COLUMN IF NOT EXISTS poke_xp INTEGER NOT NULL DEFAULT 0")
+            cursor.execute("ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS gym_badges INTEGER NOT NULL DEFAULT 0")
+            cursor.execute("ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS league_stage INTEGER NOT NULL DEFAULT 0")
+            cursor.execute("ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS league_wins INTEGER NOT NULL DEFAULT 0")
         else:
             cursor.execute(
                 """
@@ -99,6 +102,12 @@ def init_db() -> None:
                 cursor.execute("ALTER TABLE user_levels ADD COLUMN username TEXT NOT NULL DEFAULT 'Miembro'")
             if "pokeballs" not in columns:
                 cursor.execute("ALTER TABLE user_levels ADD COLUMN pokeballs INTEGER NOT NULL DEFAULT 0")
+            if "gym_badges" not in columns:
+                cursor.execute("ALTER TABLE user_levels ADD COLUMN gym_badges INTEGER NOT NULL DEFAULT 0")
+            if "league_stage" not in columns:
+                cursor.execute("ALTER TABLE user_levels ADD COLUMN league_stage INTEGER NOT NULL DEFAULT 0")
+            if "league_wins" not in columns:
+                cursor.execute("ALTER TABLE user_levels ADD COLUMN league_wins INTEGER NOT NULL DEFAULT 0")
 
             cursor.execute(
                 """
@@ -266,6 +275,115 @@ def consume_pokeball(guild_id: int, user_id: int) -> Tuple[bool, int]:
         )
         conn.commit()
         return True, remaining
+
+
+def add_pokeballs(guild_id: int, user_id: int, amount: int, username: str = "Miembro") -> int:
+    """Suma `amount` Pokéballs al usuario (crea la fila si no existe). Retorna el nuevo total."""
+    if amount <= 0:
+        return get_pokeballs(guild_id, user_id)
+
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("SELECT pokeballs FROM user_levels WHERE guild_id = ? AND user_id = ?"),
+            (guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            new_total = amount
+            cursor.execute(
+                _sql(
+                    """
+                    INSERT INTO user_levels (guild_id, user_id, username, xp, level, last_xp_timestamp, pokeballs)
+                    VALUES (?, ?, ?, 0, 1, 0, ?)
+                    """
+                ),
+                (guild_id, user_id, username, new_total),
+            )
+        else:
+            new_total = int(row[0]) + amount
+            cursor.execute(
+                _sql("UPDATE user_levels SET pokeballs = ? WHERE guild_id = ? AND user_id = ?"),
+                (new_total, guild_id, user_id),
+            )
+        conn.commit()
+        return new_total
+
+
+def get_trainer_progress(guild_id: int, user_id: int) -> dict:
+    """Retorna el progreso de Medallas de Gimnasio y Liga Pokémon del usuario."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql(
+                "SELECT gym_badges, league_stage, league_wins FROM user_levels WHERE guild_id = ? AND user_id = ?"
+            ),
+            (guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return {"gym_badges": 0, "league_stage": 0, "league_wins": 0}
+        return {
+            "gym_badges": int(row[0] or 0),
+            "league_stage": int(row[1] or 0),
+            "league_wins": int(row[2] or 0),
+        }
+
+
+def update_trainer_progress(
+    guild_id: int,
+    user_id: int,
+    gym_badges: Optional[int] = None,
+    league_stage: Optional[int] = None,
+    league_wins: Optional[int] = None,
+    username: str = "Miembro",
+) -> dict:
+    """Actualiza el progreso de Medallas de Gimnasio y Liga Pokémon del usuario."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql(
+                "SELECT gym_badges, league_stage, league_wins FROM user_levels WHERE guild_id = ? AND user_id = ?"
+            ),
+            (guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            cur_badges, cur_stage, cur_wins = 0, 0, 0
+            cursor.execute(
+                _sql(
+                    """
+                    INSERT INTO user_levels (guild_id, user_id, username, xp, level, last_xp_timestamp, pokeballs, gym_badges, league_stage, league_wins)
+                    VALUES (?, ?, ?, 0, 1, 0, 0, 0, 0, 0)
+                    """
+                ),
+                (guild_id, user_id, username),
+            )
+        else:
+            cur_badges = int(row[0] or 0)
+            cur_stage = int(row[1] or 0)
+            cur_wins = int(row[2] or 0)
+
+        new_badges = cur_badges if gym_badges is None else gym_badges
+        new_stage = cur_stage if league_stage is None else league_stage
+        new_wins = cur_wins if league_wins is None else league_wins
+
+        cursor.execute(
+            _sql(
+                """
+                UPDATE user_levels
+                SET gym_badges = ?, league_stage = ?, league_wins = ?
+                WHERE guild_id = ? AND user_id = ?
+                """
+            ),
+            (new_badges, new_stage, new_wins, guild_id, user_id),
+        )
+        conn.commit()
+        return {
+            "gym_badges": new_badges,
+            "league_stage": new_stage,
+            "league_wins": new_wins,
+        }
 
 
 def get_pokemon_team(guild_id: int, user_id: int) -> List[dict]:
