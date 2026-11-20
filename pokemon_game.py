@@ -16,11 +16,14 @@ from PIL import Image, ImageDraw, ImageFont
 from database import (
     get_pokeballs,
     consume_pokeball,
+    add_pokeballs,
     get_pokemon_team,
     add_pokemon_to_team,
     replace_pokemon_in_team,
     add_pokemon_xp,
     get_user_stats,
+    get_trainer_progress,
+    update_trainer_progress,
 )
 
 CATCH_CHANNEL_NAME = "🎮𝑪𝑨𝑻𝑪𝑯"
@@ -446,7 +449,7 @@ class ReplacePokemonView(discord.ui.View):
 
         for idx, mon in enumerate(team[:6], start=1):
             shiny_tag = "✨ " if mon["is_shiny"] else ""
-            label = f"{idx}. {shiny_tag}{mon['name']} ({mon['rarity']})" 
+            label = f"{idx}. {shiny_tag}{mon['name']} ({mon['rarity']})"
             btn = discord.ui.Button(label=label[:80], style=discord.ButtonStyle.secondary, row=(idx - 1) // 3)
             btn.callback = self._make_replace_callback(mon)
             self.add_item(btn)
@@ -1092,12 +1095,419 @@ async def _send_team_card(interaction: discord.Interaction, usuario: Optional[di
     await interaction.followup.send(file=file)
 
 
+@dataclass(frozen=True)
+class TrainerOpponent:
+    name: str
+    title: str
+    pokemon_id: int
+    pokemon_name: str
+    rarity: str
+    ptype: str
+    level: int
+    quote: str
+    xp_win: int
+    xp_loss: int
+    pokeball_chance: float
+    pokeball_amount: int = 1
+    badge_name: str = ""
+    badge_emoji: str = ""
+
+
+RANDOM_TRAINERS: List[TrainerOpponent] = [
+    TrainerOpponent("Tito", "Dominguero", 19, "Rattata", "Común", "Normal", 5, "¡Mis shorts son súper cómodos y fáciles de llevar!", 45, 14, 0.45, 1),
+    TrainerOpponent("Mateo", "Pescador", 129, "Magikarp", "Común", "Agua", 7, "¡Picó algo enorme... bueno, casi! ¡A pelear!", 50, 15, 0.45, 1),
+    TrainerOpponent("Lucas", "Cazabichos", 123, "Scyther", "Raro", "Bicho/Volador", 11, "¡Mis Pokémon bicho son los más rápidos del Bosque Verde!", 65, 20, 0.55, 1),
+    TrainerOpponent("Secuaz Rocket", "Team Rocket", 52, "Meowth", "Raro", "Normal", 13, "¡Entregá a tus Pokémon o preparate para el combate!", 75, 22, 0.60, 1),
+    TrainerOpponent("Jessie y James", "Dúo del Team Rocket", 24, "Arbok", "Raro", "Veneno", 16, "¡Para proteger al mundo de la devastación, vamos a derrotarte!", 90, 28, 0.65, 1),
+    TrainerOpponent("Enfermera Joy", "Desafío Amistoso", 113, "Chansey", "Raro", "Normal", 18, "¡Hasta en el Centro Pokémon entrenamos duro todos los días!", 95, 30, 0.65, 1),
+    TrainerOpponent("Gary Oak", "Rival Clásico", 197, "Umbreon", "Épico", "Siniestro", 24, "¡Huelo a novato por acá! ¡Mostrame qué tan fuerte sos!", 135, 42, 0.75, 2),
+    TrainerOpponent("Ash Ketchum", "Entrenador de Pueblo Paleta", 25, "Pikachu", "Épico", "Eléctrico", 27, "¡Pikachu, yo te elijo! ¡Vamos a dar lo mejor en esta batalla!", 150, 48, 0.80, 2),
+    TrainerOpponent("N", "Rey del Equipo Plasma", 571, "Zoroark", "Épico", "Siniestro", 30, "¿Podés escuchar el corazón de tus Pokémon en medio del combate?", 170, 55, 0.80, 2),
+    TrainerOpponent("Red", "Entrenador Legendario", 6, "Charizard", "Legendario", "Fuego/Volador", 36, "...", 220, 70, 0.90, 2),
+]
+
+GYM_LEADERS: List[TrainerOpponent] = [
+    TrainerOpponent("Brock", "Líder de Gimnasio (Ciudad Plateada)", 95, "Onix", "Raro", "Roca/Tierra", 10, "¡Mi defensa de roca es impenetrable!", 95, 30, 1.0, 1, "Medalla Roca", "🪨"),
+    TrainerOpponent("Misty", "Líder de Gimnasio (Ciudad Celeste)", 121, "Starmie", "Raro", "Agua/Psíquico", 15, "¡Te voy a arrastrar con la fuerza del océano!", 125, 40, 1.0, 1, "Medalla Cascada", "💧"),
+    TrainerOpponent("Lt. Surge", "Líder de Gimnasio (Ciudad Carmín)", 26, "Raichu", "Raro", "Eléctrico", 20, "¡Te voy a electrocutar en un abrir y cerrar de ojos!", 160, 50, 1.0, 1, "Medalla Trueno", "⚡"),
+    TrainerOpponent("Erika", "Líder de Gimnasio (Ciudad Azulona)", 45, "Vileplume", "Raro", "Planta/Veneno", 25, "¡Qué lindo día para una batalla elegante!", 195, 65, 1.0, 1, "Medalla Arcoíris", "🌿"),
+    TrainerOpponent("Koga", "Líder de Gimnasio (Ciudad Fucsia)", 110, "Weezing", "Raro", "Veneno", 30, "¡Mis técnicas ninja y venenosas te dejarán sin salida!", 235, 75, 1.0, 1, "Medalla Alma", "☠️"),
+    TrainerOpponent("Sabrina", "Líder de Gimnasio (Ciudad Azafrán)", 65, "Alakazam", "Épico", "Psíquico", 35, "Ya vi tu derrota en mi mente antes de empezar...", 280, 90, 1.0, 2, "Medalla Pantano", "🔮"),
+    TrainerOpponent("Blaine", "Líder de Gimnasio (Isla Canela)", 59, "Arcanine", "Épico", "Fuego", 40, "¡Ja! ¡Mis Pokémon de fuego te van a dejar en cenizas!", 330, 105, 1.0, 2, "Medalla Volcán", "🔥"),
+    TrainerOpponent("Giovanni", "Líder de Gimnasio (Ciudad Verde)", 34, "Nidoking", "Épico", "Veneno/Tierra", 45, "¡Contemplá el verdadero poder del jefe!", 390, 125, 1.0, 2, "Medalla Tierra", "🌍"),
+]
+
+LEAGUE_CHALLENGERS: List[TrainerOpponent] = [
+    TrainerOpponent("Lorelei", "Alto Mando 1/5 • Especialista en Hielo", 131, "Lapras", "Épico", "Agua/Hielo", 48, "¡Nadie resiste el frío absoluto de mis Pokémon!", 430, 140, 1.0, 1, "Sala Helada", "❄️"),
+    TrainerOpponent("Bruno", "Alto Mando 2/5 • Especialista en Lucha", 68, "Machamp", "Épico", "Lucha", 51, "¡El poder puro de nuestros músculos te aplastará!", 470, 155, 1.0, 1, "Sala de Lucha", "🥊"),
+    TrainerOpponent("Agatha", "Alto Mando 3/5 • Especialista en Fantasma", 94, "Gengar", "Épico", "Fantasma/Veneno", 54, "¡Las sombras de la Liga te van a devorar, jovencito!", 510, 170, 1.0, 1, "Sala Espectral", "👻"),
+    TrainerOpponent("Lance", "Alto Mando 4/5 • Maestro de Dragones", 149, "Dragonite", "Legendario", "Dragón/Volador", 58, "¡Los dragones son invencibles! ¿Podrás soportarlos?", 580, 190, 1.0, 2, "Sala Dragón", "🐉"),
+    TrainerOpponent("Cynthia", "Campeona de la Liga Pokémon 5/5", 445, "Garchomp", "Legendario", "Dragón/Tierra", 63, "¡Mostrame el vínculo que construiste con tu equipo!", 720, 230, 1.0, 3, "Campeón de la Liga", "👑"),
+]
+
+
+class TrainerBattleView(discord.ui.View):
+    """Vista de combate contra Entrenadores (/battle), Gimnasios (/gymchallenge) y Liga (/pokemonleague)."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        author_id: int,
+        author_name: str,
+        mode: str,  # "battle", "gym", "league"
+        opponent: TrainerOpponent,
+        team: list[dict],
+        on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+        stage_index: int = 0,
+        is_rematch: bool = False,
+    ):
+        super().__init__(timeout=120)
+        self.guild = guild
+        self.author_id = author_id
+        self.author_name = author_name
+        self.mode = mode
+        self.opponent = opponent
+        self.team = team
+        self.on_backup = on_backup
+        self.stage_index = stage_index
+        self.is_rematch = is_rematch
+
+        for idx, mon in enumerate(team[:6], start=1):
+            shiny_tag = "✨ " if mon.get("is_shiny") else ""
+            lvl = mon.get("poke_level", 1)
+            btn = discord.ui.Button(
+                label=f"{idx}. {shiny_tag}{mon['name']} (Nv. {lvl})",
+                style=discord.ButtonStyle.primary,
+                row=(idx - 1) // 3,
+            )
+            btn.callback = self._make_fight_cb(mon)
+            self.add_item(btn)
+
+    def _make_fight_cb(self, mon: dict):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message(
+                    "🔥 ¡Este combate no es tuyo! Usá el comando por tu cuenta.",
+                    ephemeral=True,
+                )
+                return
+
+            fighter_lvl = int(mon.get("poke_level", 1))
+            fighter_power = RARITY_POWER.get(mon["rarity"], 10) + fighter_lvl * 3 + (5 if mon.get("is_shiny") else 0)
+            opp_power = RARITY_POWER.get(self.opponent.rarity, 12) + self.opponent.level * 3
+
+            win_chance = 0.52 + (fighter_power - opp_power) * 0.025
+            win_chance = max(0.20, min(0.92, win_chance))
+            won = random.random() <= win_chance
+
+            xp_gain = self.opponent.xp_win if won else self.opponent.xp_loss
+            xp_res = add_pokemon_xp(
+                row_id=mon["id"],
+                guild_id=self.guild.id,
+                user_id=self.author_id,
+                xp_gain=xp_gain,
+                evolution_table=EVOLUTION_TABLE,
+            )
+
+            shiny_f = "✨ " if mon.get("is_shiny") else ""
+            if xp_res:
+                new_name = xp_res["name"]
+                old_name = xp_res["old_name"]
+                new_lvl = xp_res["new_level"]
+                new_xp = xp_res["new_xp"]
+                next_xp = xp_res["next_xp"]
+                leveled_up = xp_res["leveled_up"]
+                evolved = xp_res["evolved"]
+                art_id = xp_res["pokedex_id"]
+            else:
+                new_name = mon["name"]
+                old_name = mon["name"]
+                new_lvl = fighter_lvl
+                new_xp = mon.get("poke_xp", 0) + xp_gain
+                next_xp = 40 * max(1, new_lvl)
+                leveled_up = False
+                evolved = False
+                art_id = mon["pokedex_id"]
+
+            reward_lines = [
+                f"⭐ **+{xp_gain} XP** para **{shiny_f}{new_name}** (`{new_xp}/{next_xp} XP` • **Nv. {new_lvl}**)"
+            ]
+            if leveled_up:
+                reward_lines.append(f"🆙 *¡Subió a **Nivel {new_lvl}**!*")
+            if evolved:
+                reward_lines.append(
+                    f"✨ **¡EVOLUCIÓN!** *{shiny_f}{old_name}* evolucionó en **{shiny_f}{new_name}**! 🎉"
+                )
+
+            pokeballs_won = 0
+            if won:
+                if self.mode == "battle":
+                    if random.random() <= self.opponent.pokeball_chance:
+                        pokeballs_won = self.opponent.pokeball_amount
+                elif self.mode == "gym":
+                    if not self.is_rematch:
+                        pokeballs_won = self.opponent.pokeball_amount
+                        update_trainer_progress(
+                            self.guild.id,
+                            self.author_id,
+                            gym_badges=self.stage_index + 1,
+                            username=self.author_name,
+                        )
+                        reward_lines.append(
+                            f"{self.opponent.badge_emoji} **¡Obtuviste la {self.opponent.badge_name}!** (`{self.stage_index + 1}/8`)"
+                        )
+                        if self.stage_index + 1 >= len(GYM_LEADERS):
+                            reward_lines.append("👑 *¡Ya tenés las 8 Medallas! Podés desafiar `/pokemonleague`.*")
+                    elif random.random() <= 0.50:
+                        pokeballs_won = 1
+                elif self.mode == "league":
+                    if self.stage_index + 1 >= len(LEAGUE_CHALLENGERS):
+                        pokeballs_won = self.opponent.pokeball_amount
+                        cur = get_trainer_progress(self.guild.id, self.author_id)
+                        new_wins = cur["league_wins"] + 1
+                        update_trainer_progress(
+                            self.guild.id,
+                            self.author_id,
+                            league_stage=0,
+                            league_wins=new_wins,
+                            username=self.author_name,
+                        )
+                        reward_lines.append(
+                            f"🏆 **¡SOS CAMPEÓN DE LA LIGA POKÉMON!** *(Títulos: **{new_wins}**)*"
+                        )
+                    else:
+                        pokeballs_won = self.opponent.pokeball_amount
+                        update_trainer_progress(
+                            self.guild.id,
+                            self.author_id,
+                            league_stage=self.stage_index + 1,
+                            username=self.author_name,
+                        )
+                        next_opp = LEAGUE_CHALLENGERS[self.stage_index + 1]
+                        reward_lines.append(
+                            f"➡️ *Avanzaste a la ronda **{self.stage_index + 2}/5**: **{next_opp.name}**. ¡Volvé a tirar `/pokemonleague`!*"
+                        )
+
+                if pokeballs_won > 0:
+                    total_balls = add_pokeballs(
+                        self.guild.id,
+                        self.author_id,
+                        pokeballs_won,
+                        username=self.author_name,
+                    )
+                    reward_lines.append(
+                        f"🎱 **+{pokeballs_won} Pokéball{'s' if pokeballs_won > 1 else ''}** *(Total: **{total_balls}**)*"
+                    )
+
+            for item in self.children:
+                item.disabled = True
+
+            if won:
+                embed = discord.Embed(
+                    title=f"🏆 ¡VICTORIA CONTRA {self.opponent.name.upper()}! 🔥",
+                    description=(
+                        f"Tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*) venció al **{self.opponent.pokemon_name}** (*Nv. {self.opponent.level}*) de **{self.opponent.name}** (*{self.opponent.title}*).\n\n"
+                        + "\n".join(reward_lines)
+                    ),
+                    color=discord.Color.gold() if (evolved or self.mode in ("gym", "league")) else discord.Color.green(),
+                )
+            else:
+                embed = discord.Embed(
+                    title=f"💥 ¡DERROTA ANTE {self.opponent.name.upper()}!",
+                    description=(
+                        f"El **{self.opponent.pokemon_name}** (*Nv. {self.opponent.level}*) de **{self.opponent.name}** (*{self.opponent.title}*) superó a tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*).\n\n"
+                        + "\n".join(reward_lines)
+                        + "\n\n*¡Igual sumaste experiencia de entrenamiento! Subí de nivel y volvé por la revancha.*"
+                    ),
+                    color=discord.Color.red(),
+                )
+
+            embed.set_image(url=get_artwork_url(art_id, bool(mon.get("is_shiny"))))
+            embed.set_thumbnail(url=get_artwork_url(self.opponent.pokemon_id, False))
+            embed.set_footer(text="Victini Bot • Combate de Entrenadores 🔥✌️")
+            await interaction.response.edit_message(embed=embed, view=self)
+            asyncio.create_task(self.on_backup(self.guild, True))
+
+        return callback
+
+
 def setup_pokemon_commands(
     bot: commands.Bot,
     on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
     find_channel_fn: Callable[[discord.Guild, str], Optional[discord.TextChannel]],
 ) -> None:
-    """Registra /catch (exclusivo de 🎮𝑪𝑨𝑻𝑪𝑯), /team y /equipo en el árbol de comandos de Victini."""
+    """Registra /catch, /battle, /gymchallenge, /pokemonleague (exclusivos de 🎮𝑪𝑨𝑻𝑪𝑯), /team y /equipo."""
+
+    async def _require_catch_channel_and_team(interaction: discord.Interaction, cmd_name: str) -> Optional[list[dict]]:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Este comando solo funciona dentro del servidor **SNAP!** 🔥",
+                ephemeral=True,
+            )
+            return None
+
+        if not is_catch_channel(interaction.channel):
+            catch_ch = find_channel_fn(interaction.guild, CATCH_CHANNEL_NAME)
+            ch_mention = catch_ch.mention if catch_ch else f"**{CATCH_CHANNEL_NAME}**"
+            await interaction.response.send_message(
+                f"🎮 ¡Ey! El comando `/{cmd_name}` solo se puede usar en el canal {ch_mention} 👀🔥",
+                ephemeral=True,
+            )
+            return None
+
+        team = get_pokemon_team(interaction.guild.id, interaction.user.id)
+        if not team:
+            await interaction.response.send_message(
+                "❌ Todavía no tenés ningún Pokémon en tu equipo. ¡Usá `/catch` primero para atrapar tu primer compañero! 🔥",
+                ephemeral=True,
+            )
+            return None
+        return team
+
+    @bot.tree.command(
+        name="battle",
+        description="Enfrentá a un Entrenador Pokémon para ganar XP y chances de Pokéballs (Solo en 🎮𝑪𝑨𝑻𝑪𝑯)",
+    )
+    async def battle_command(interaction: discord.Interaction):
+        team = await _require_catch_channel_and_team(interaction, "battle")
+        if team is None:
+            return
+
+        trainer = random.choice(RANDOM_TRAINERS)
+        cfg = RARITY_CONFIG[trainer.rarity]
+        embed = discord.Embed(
+            title=f"⚔️ ¡{trainer.name} ({trainer.title}) te desafía a combatir! 🔥",
+            description=(
+                f"> *\"{trainer.quote}\"*\n\n"
+                f"🐾 **Pokémon rival:** **{trainer.pokemon_name}** (*Nv. {trainer.level}*)\n"
+                f"{cfg['emoji']} **Rareza:** {trainer.rarity} | **Tipo:** {trainer.ptype}\n"
+                f"🎁 **Recompensa si ganás:** **+{trainer.xp_win} XP** y **{int(trainer.pokeball_chance * 100)}%** de chance de **+{trainer.pokeball_amount} Pokéball{'s' if trainer.pokeball_amount > 1 else ''}**\n"
+                f"📉 **Si perdés:** **+{trainer.xp_loss} XP** de entrenamiento\n\n"
+                f"*Elegí qué Pokémon de tu equipo sale a pelear:*"
+            ),
+            color=cfg["color"],
+        )
+        embed.set_image(url=get_artwork_url(trainer.pokemon_id, False))
+        embed.set_footer(text="Victini Bot • Desafío de Entrenadores 🔥✌️")
+
+        view = TrainerBattleView(
+            guild=interaction.guild,
+            author_id=interaction.user.id,
+            author_name=interaction.user.display_name,
+            mode="battle",
+            opponent=trainer,
+            team=team,
+            on_backup=on_backup,
+        )
+        await interaction.response.send_message(embed=embed, view=view)
+
+    @bot.tree.command(
+        name="gymchallenge",
+        description="Desafiá a los 8 Líderes de Gimnasio para ganar Medallas, XP y Pokéballs (Solo en 🎮𝑪𝑨𝑻𝑪𝑯)",
+    )
+    async def gymchallenge_command(interaction: discord.Interaction):
+        team = await _require_catch_channel_and_team(interaction, "gymchallenge")
+        if team is None:
+            return
+
+        progress = get_trainer_progress(interaction.guild.id, interaction.user.id)
+        badges = progress["gym_badges"]
+        is_rematch = badges >= len(GYM_LEADERS)
+        stage_idx = random.randrange(len(GYM_LEADERS)) if is_rematch else badges
+        leader = GYM_LEADERS[stage_idx]
+        cfg = RARITY_CONFIG[leader.rarity]
+
+        header_note = (
+            f"🏅 **Tus Medallas:** `8/8` *(¡Revancha de Gimnasio!)*"
+            if is_rematch
+            else f"🏅 **Desafío de Medalla #{stage_idx + 1}/8:** {leader.badge_emoji} **{leader.badge_name}**"
+        )
+        ball_note = (
+            f"**50%** de chance de **+1 Pokéball**"
+            if is_rematch
+            else f"**+{leader.pokeball_amount} Pokéball{'s' if leader.pokeball_amount > 1 else ''} garantizada{'s' if leader.pokeball_amount > 1 else ''}** + **{leader.badge_emoji} {leader.badge_name}**"
+        )
+
+        embed = discord.Embed(
+            title=f"🏟️ ¡Gimnasio Pokémon: Líder {leader.name}! 🔥",
+            description=(
+                f"{header_note}\n"
+                f"*{leader.title}*\n\n"
+                f"> *\"{leader.quote}\"*\n\n"
+                f"🐾 **Pokémon estrella:** **{leader.pokemon_name}** (*Nv. {leader.level}*)\n"
+                f"{cfg['emoji']} **Rareza:** {leader.rarity} | **Tipo:** {leader.ptype}\n"
+                f"🎁 **Si ganás:** **+{leader.xp_win} XP** y {ball_note}\n"
+                f"📉 **Si perdés:** **+{leader.xp_loss} XP**\n\n"
+                f"*Elegí qué Pokémon de tu equipo va al gimnasio:*"
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.set_image(url=get_artwork_url(leader.pokemon_id, False))
+        embed.set_footer(text="Victini Bot • Desafío de Gimnasios 🔥✌️")
+
+        view = TrainerBattleView(
+            guild=interaction.guild,
+            author_id=interaction.user.id,
+            author_name=interaction.user.display_name,
+            mode="gym",
+            opponent=leader,
+            team=team,
+            on_backup=on_backup,
+            stage_index=stage_idx,
+            is_rematch=is_rematch,
+        )
+        await interaction.response.send_message(embed=embed, view=view)
+
+    @bot.tree.command(
+        name="pokemonleague",
+        description="Enfrentá al Alto Mando y la Campeona de la Liga Pokémon (Requiere 8 Medallas • Solo en 🎮𝑪𝑨𝑻𝑪𝑯)",
+    )
+    async def pokemonleague_command(interaction: discord.Interaction):
+        team = await _require_catch_channel_and_team(interaction, "pokemonleague")
+        if team is None:
+            return
+
+        progress = get_trainer_progress(interaction.guild.id, interaction.user.id)
+        if progress["gym_badges"] < len(GYM_LEADERS):
+            await interaction.response.send_message(
+                f"🔒 **Todavía no podés entrar a la Liga Pokémon.**\n"
+                f"Necesitás las **8 Medallas de Gimnasio** y actualmente tenés **`{progress['gym_badges']}/8`**.\n"
+                f"*Usá `/gymchallenge` para conseguir las que te faltan!* 🏟️🔥",
+                ephemeral=True,
+            )
+            return
+
+        stage_idx = progress["league_stage"] % len(LEAGUE_CHALLENGERS)
+        challenger = LEAGUE_CHALLENGERS[stage_idx]
+        cfg = RARITY_CONFIG[challenger.rarity]
+
+        embed = discord.Embed(
+            title=f"👑 ¡Liga Pokémon ({stage_idx + 1}/5): {challenger.name}! 🔥",
+            description=(
+                f"*{challenger.title}* | 🏆 *Títulos ganados: **{progress['league_wins']}***\n\n"
+                f"> *\"{challenger.quote}\"*\n\n"
+                f"🐾 **Pokémon rival:** **{challenger.pokemon_name}** (*Nv. {challenger.level}*)\n"
+                f"{cfg['emoji']} **Rareza:** {challenger.rarity} | **Tipo:** {challenger.ptype}\n"
+                f"🎁 **Si ganás:** **+{challenger.xp_win} XP** y **+{challenger.pokeball_amount} Pokéball{'s' if challenger.pokeball_amount > 1 else ''}**\n"
+                f"📉 **Si perdés:** **+{challenger.xp_loss} XP**\n\n"
+                f"*Elegí qué Pokémon de tu equipo entra a la arena:*"
+            ),
+            color=discord.Color.purple(),
+        )
+        embed.set_image(url=get_artwork_url(challenger.pokemon_id, False))
+        embed.set_footer(text="Victini Bot • Liga Pokémon 🔥✌️")
+
+        view = TrainerBattleView(
+            guild=interaction.guild,
+            author_id=interaction.user.id,
+            author_name=interaction.user.display_name,
+            mode="league",
+            opponent=challenger,
+            team=team,
+            on_backup=on_backup,
+            stage_index=stage_idx,
+        )
+        await interaction.response.send_message(embed=embed, view=view)
 
     @bot.tree.command(
         name="catch",
