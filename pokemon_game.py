@@ -164,10 +164,10 @@ def get_artwork_url(pokedex_id: int, is_shiny: bool = False) -> str:
 
 
 def roll_wild_pokemon() -> tuple[PokemonSpecies, bool]:
-    """Elige un Pokémon aleatorio ponderado por rareza y con 5% de probabilidad Shiny."""
+    """Elige un Pokémon aleatorio ponderado por rareza y con 1% de probabilidad Shiny."""
     weights = [RARITY_CONFIG[p.rarity]["weight"] for p in POKEMON_POOL]
     species = random.choices(POKEMON_POOL, weights=weights, k=1)[0]
-    is_shiny = random.random() < 0.05
+    is_shiny = random.random() < 0.01
     return species, is_shiny
 
 
