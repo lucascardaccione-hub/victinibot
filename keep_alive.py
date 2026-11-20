@@ -207,10 +207,12 @@ def home():
                             for (const mon of row.team) {
                                 const shinyPath = mon.is_shiny ? 'shiny/' : '';
                                 const imgUrl = `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${shinyPath}${mon.pokedex_id}.png`;
-                                const badgeTitle = `${mon.is_shiny ? '✨ ' : ''}${mon.name} (${mon.rarity})`;
+                                const lvlTag = mon.poke_level ? ` Nv.${mon.poke_level}` : '';
+                                const badgeTitle = `${mon.is_shiny ? '✨ ' : ''}${mon.name}${lvlTag} (${mon.rarity})`;
                                 teamHtml += `<div title="${badgeTitle}" style="display:inline-flex; align-items:center; gap:4px; background:#101225; border:1px solid rgba(255,159,28,0.35); border-radius:999px; padding:2px 8px 2px 4px; font-size:12px;">
                                     <img src="${imgUrl}" alt="${mon.name}" style="width:24px; height:24px; object-fit:contain;">
                                     <span>${mon.is_shiny ? '✨' : ''}${mon.name}</span>
+                                    <span style="color:#ff9f1c; font-weight:bold; font-size:11px;">${lvlTag}</span>
                                 </div>`;
                             }
                             teamHtml += '</div>';
