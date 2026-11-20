@@ -28,6 +28,7 @@ from database import (
 )
 from music import setup_music_commands
 from pokemon_game import setup_pokemon_commands, build_welcome_card_png
+from promo_cards import build_entreturnos_card_png, build_snap_card_png
 
 # Forzar salida sin buffer en Render para que todos los print() aparezcan al instante en los Logs
 sys.stdout.reconfigure(line_buffering=True)
@@ -40,6 +41,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 WELCOME_CHANNEL_NAME = "🫂𝑩𝑰𝑬𝑵𝑽𝑬𝑵𝑰𝑫𝑰𝑻𝑻𝑶𝑺"
 LEVEL_CHANNEL_NAME = "🌀𝑺𝑵𝑨𝑷-𝑳𝑬𝑽𝑬𝑳🌀"
 UPDATES_CHANNEL_NAME = "🔥𝑽𝑰𝑪𝑻𝑰𝑵𝑰-𝑼𝑷𝑫𝑨𝑻𝑬𝑺🔥"
+CHAT_GENERAL_CHANNEL_NAME = "🛗𝑪𝑯𝑨𝑻-𝑮𝑬𝑵𝑬𝑹𝑨𝑳"
 BACKUP_CHANNEL_NAME = "victini-db-backup"
 
 # Zona horaria de Argentina (UTC-3)
@@ -127,6 +129,17 @@ def is_snap_level_channel(channel: Optional[discord.abc.GuildChannel]) -> bool:
     if normalize_channel_name(channel.name) == normalize_channel_name(LEVEL_CHANNEL_NAME):
         return True
     return clean_alnum(channel.name) == clean_alnum(LEVEL_CHANNEL_NAME)
+
+
+def is_chat_general_channel(channel: Optional[discord.abc.GuildChannel]) -> bool:
+    """Verifica que el canal donde se ejecutó el comando sea exclusivamente 🛗𝑪𝑯𝑨𝑻-𝑮𝑬𝑵𝑬𝑹𝑨𝑳."""
+    if channel is None or not hasattr(channel, "name"):
+        return False
+    if channel.name == CHAT_GENERAL_CHANNEL_NAME:
+        return True
+    if normalize_channel_name(channel.name) == normalize_channel_name(CHAT_GENERAL_CHANNEL_NAME):
+        return True
+    return clean_alnum(channel.name) == clean_alnum(CHAT_GENERAL_CHANNEL_NAME)
 
 
 # ==========================================
@@ -464,6 +477,10 @@ class VictiniBot(commands.Bot):
         if not voice_xp_loop.is_running():
             voice_xp_loop.start()
 
+        # 6. Iniciar bucle promocional en 🛗𝑪𝑯𝑨𝑻-𝑮𝑬𝑵𝑬𝑹𝑨𝑳 (cada 4 horas)
+        if not promo_loop.is_running():
+            promo_loop.start()
+
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
@@ -696,6 +713,102 @@ async def voice_xp_loop():
 @voice_xp_loop.before_loop
 async def before_voice_xp_loop():
     await bot.wait_until_ready()
+
+
+# ==========================================
+# 2C. CHIVOS AUTOMÁTICOS CADA 4 HORAS EN 🛗𝑪𝑯𝑨𝑻-𝑮𝑬𝑵𝑬𝑹𝑨𝑳 Y COMANDO /chivo
+# ==========================================
+_promo_next_idx = 0
+
+
+def build_promo_payload(choice_idx: Optional[int] = None) -> tuple[str, discord.File]:
+    """Construye el texto con estilo Victini y la tarjeta PNG adjunta para Mensaje 1 (EntreTurnos) o Mensaje 2 (SNAP!)."""
+    global _promo_next_idx
+    if choice_idx in (0, 1):
+        idx = choice_idx
+    else:
+        idx = _promo_next_idx % 2
+        _promo_next_idx = (idx + 1) % 2
+
+    if idx == 0:
+        text = (
+            "🔥 **¡Hey! Recuerden suscribirse al canal de *EntreTurnos* en YouTube** ✌️🎥\n"
+            "*¡Prendete al mejor **Streaming de Pokémon TCG** con Victini!* ⚡🎴\n\n"
+            "👉 https://www.youtube.com/@EntreTurnosLIVE"
+        )
+        png_bytes = build_entreturnos_card_png()
+        return text, discord.File(io.BytesIO(png_bytes), filename="entreturnos_tcg.png")
+
+    text = (
+        "🃏 **¡Atención entrenadores de *SNAP!* 🔥✌️**\n"
+        "*Podés comprarnos **cartón jugable y brillante** en **SNAP! Stock*** 🛒✨\n"
+        "👉 https://catalogo.snap-stock.com/snap/catalogo\n\n"
+        "*O también en **TCG Fans*** 🎴🔥\n"
+        "👉 https://tcg.fans/pokemon/profile/SNAP%21/products\n\n"
+        "📍 ***¡También estamos todos los Sábados en Lo de Charly (`Chaco 21`)!*** *¡Te esperamos!* 🙌"
+    )
+    png_bytes = build_snap_card_png()
+    return text, discord.File(io.BytesIO(png_bytes), filename="snap_tcg.png")
+
+
+@tasks.loop(hours=4)
+async def promo_loop():
+    # Evitar spamear inmediatamente al reiniciar/desplegar en Render; espera las primeras 4 horas
+    if promo_loop.current_loop == 0:
+        return
+
+    for guild in bot.guilds:
+        target_ch = find_target_channel(guild, CHAT_GENERAL_CHANNEL_NAME)
+        if target_ch is None:
+            continue
+        try:
+            text, card_file = await asyncio.to_thread(build_promo_payload, None)
+            await target_ch.send(content=text, file=card_file)
+            print(f"📢 Chivo automático enviado a '{target_ch.name}' en {guild.name}.", flush=True)
+        except Exception as e:
+            print(f"⚠️ Error enviando chivo automático en {guild.name}: {e}", flush=True)
+
+
+@promo_loop.before_loop
+async def before_promo_loop():
+    await bot.wait_until_ready()
+
+
+@bot.tree.command(
+    name="chivo",
+    description="Fuerza uno de los mensajes promocionales de EntreTurnos o SNAP! (Solo en 🛗𝑪𝑯𝑨𝑻-𝑮𝑬𝑵𝑬𝑹𝑨𝑳)",
+)
+@app_commands.describe(mensaje="(Opcional) Elegí cuál chivo mandar; si no elegís ninguno, va alternando")
+@app_commands.choices(
+    mensaje=[
+        app_commands.Choice(name="EntreTurnos (YouTube Streaming de Pokémon TCG)", value=0),
+        app_commands.Choice(name="SNAP! Stock / TCG Fans / Lo de Charly", value=1),
+    ]
+)
+async def chivo_command(
+    interaction: discord.Interaction,
+    mensaje: Optional[app_commands.Choice[int]] = None,
+):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Este comando solo funciona dentro del servidor **SNAP!** 🔥",
+            ephemeral=True,
+        )
+        return
+
+    if not is_chat_general_channel(interaction.channel):
+        chat_ch = find_target_channel(interaction.guild, CHAT_GENERAL_CHANNEL_NAME)
+        ch_mention = chat_ch.mention if chat_ch else f"**{CHAT_GENERAL_CHANNEL_NAME}**"
+        await interaction.response.send_message(
+            f"📢 ¡Ey! El comando `/chivo` solo se puede usar en el canal {ch_mention} 👀🔥",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
+    choice_val = mensaje.value if mensaje is not None else None
+    text, card_file = await asyncio.to_thread(build_promo_payload, choice_val)
+    await interaction.followup.send(content=text, file=card_file)
 
 
 # ==========================================
