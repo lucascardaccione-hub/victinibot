@@ -30,6 +30,7 @@ from music import setup_music_commands
 from pokemon_game import setup_pokemon_commands, build_welcome_card_png
 from promo_cards import build_entreturnos_card_png, build_snap_card_png
 from tcg_booster import BoosterPackView
+from youtube_notifier import check_entreturnos_updates
 
 # Forzar salida sin buffer en Render para que todos los print() aparezcan al instante en los Logs
 sys.stdout.reconfigure(line_buffering=True)
@@ -500,6 +501,10 @@ class VictiniBot(commands.Bot):
         if not promo_loop.is_running():
             promo_loop.start()
 
+        # 7. Iniciar monitor de YouTube (@EntreTurnosLIVE: directos y nuevos videos cada 3 min)
+        if not youtube_notifier_loop.is_running():
+            youtube_notifier_loop.start()
+
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
@@ -577,9 +582,9 @@ MOCKING_INSULT_REPLIES = [
 VICTINI_FRIENDLY_REPLIES = [
     "¡Acá estoy! 🔥✌️ Siempre vigilando que nadie se pase de vivo en **SNAP!** 👀",
     "¿Alguien me invocó? ✌️🔥 ¡Estoy al 100% al servicio de **SNAP!**",
-    "¡Presente! 🔥 Si querés música usá `/victiniplay`, y si querés atrapar Pokémon pasate por `🎮𝑪𝑨𝑻𝑪𝑯` 👀",
-    "¡Buenas! ✌️🔥 Recordá que cada nivel que subís te da **+1 Pokéball** para usar en `/catch` 🎱",
-    "¿Qué onda? 👀🔥 Seguí charlando o activo en voz para subir en el `/ranking` de **SNAP!**",
+    f"¡Presente! 🔥 Si querés música usá `/victiniplay`, y si querés atrapar Pokémon pasate por `🎮𝑪𝑨𝑻𝑪𝑯` 👀",
+    f"¡Buenas! ✌️🔥 Recordá que cada nivel que subís te da **+1 Pokéball** para usar en `/catch` 🎱",
+    f"¿Qué onda? 👀🔥 Seguí charlando o activo en voz para subir en el `/ranking` de **SNAP!**",
 ]
 
 
@@ -764,7 +769,7 @@ def build_promo_payload(choice_idx: Optional[int] = None) -> tuple[str, discord.
         "👉 https://catalogo.snap-stock.com/snap/catalogo\n\n"
         "*O también en **TCG Fans*** 🎴🔥\n"
         "👉 https://tcg.fans/pokemon/profile/SNAP%21/products\n\n"
-        "📍 ***¡También estamos todos los Sábados en Lo de Charly (`Chaco 21`)!*** *¡Te esperamos!* 🙌"
+        f"📍 ***¡También estamos todos los Sábados en Lo de Charly (`Chaco 21`)!*** *¡Te esperamos!* 🙌"
     )
     png_bytes = build_snap_card_png()
     return text, discord.File(io.BytesIO(png_bytes), filename="snap_tcg.png")
@@ -790,6 +795,49 @@ async def promo_loop():
 
 @promo_loop.before_loop
 async def before_promo_loop():
+    await bot.wait_until_ready()
+
+
+# ==========================================
+# 2D. AVISOS AUTOMÁTICOS DE YOUTUBE (@EntreTurnosLIVE) EN 🛗𝑪𝑯𝑨𝑻-𝑮𝑬𝑵𝑬𝑹𝑨𝑳
+# ==========================================
+@tasks.loop(minutes=3)
+async def youtube_notifier_loop():
+    events = await asyncio.to_thread(check_entreturnos_updates)
+    if not events:
+        return
+
+    for guild in bot.guilds:
+        target_ch = find_target_channel(guild, CHAT_GENERAL_CHANNEL_NAME)
+        if target_ch is None:
+            continue
+        for ev in events:
+            try:
+                if ev["kind"] == "live":
+                    msg = (
+                        f"🔴 **¡`@EntreTurnosLIVE` ESTÁ EN VIVO AHORA MISMO!** 🔥🎥\n"
+                        f"*¡Victini te avisa que arrancó el streaming! ¡Sumate ya!* ⚡✌️\n\n"
+                        f"📺 **{ev['title']}**\n"
+                        f"👉 {ev['url']}"
+                    )
+                else:
+                    msg = (
+                        f"🆕 **¡NUEVO CONTENIDO EN `@EntreTurnosLIVE`!** 🎬🔥\n"
+                        f"*¡Victini detectó un nuevo video recién publicado en el canal!* 👀✌️\n\n"
+                        f"📺 **{ev['title']}**\n"
+                        f"👉 {ev['url']}"
+                    )
+                await target_ch.send(msg)
+                print(
+                    f"📺 Aviso de YouTube ({ev['kind']}) enviado a '{target_ch.name}' en {guild.name}: {ev['video_id']}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"⚠️ Error enviando aviso de YouTube en {guild.name}: {e}", flush=True)
+
+
+@youtube_notifier_loop.before_loop
+async def before_youtube_notifier_loop():
     await bot.wait_until_ready()
 
 
