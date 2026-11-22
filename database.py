@@ -96,6 +96,14 @@ def init_db() -> None:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
         else:
             cursor.execute(
                 """
@@ -162,6 +170,41 @@ def init_db() -> None:
                     pulled_at REAL NOT NULL DEFAULT 0
                 )
                 """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+        conn.commit()
+
+
+def get_bot_state(key: str) -> Optional[str]:
+    """Obtiene un valor persistente de configuración/estado (ej. último video de YouTube anunciado)."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(_sql("SELECT value FROM bot_state WHERE key = ?"), (key,))
+        row = cursor.fetchone()
+        return str(row[0]) if row else None
+
+
+def set_bot_state(key: str, value: str) -> None:
+    """Guarda o actualiza un valor persistente de estado en PostgreSQL o SQLite."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(_sql("SELECT key FROM bot_state WHERE key = ?"), (key,))
+        if cursor.fetchone() is None:
+            cursor.execute(
+                _sql("INSERT INTO bot_state (key, value) VALUES (?, ?)"),
+                (key, str(value)),
+            )
+        else:
+            cursor.execute(
+                _sql("UPDATE bot_state SET value = ? WHERE key = ?"),
+                (str(value), key),
             )
         conn.commit()
 
