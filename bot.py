@@ -497,7 +497,7 @@ class VictiniBot(commands.Bot):
         if not voice_xp_loop.is_running():
             voice_xp_loop.start()
 
-        # 6. Iniciar bucle promocional en 🛗𝑪𝑯𝑨𝑻-𝑮𝑬𝑵𝑬𝑹𝑨𝑳 (cada 4 horas)
+        # 6. Iniciar bucle promocional en 🛗𝑪𝑯𝑨𝑻-𝑮𝑬𝑵𝑬𝑹𝑨𝑳 (cada 12 horas)
         if not promo_loop.is_running():
             promo_loop.start()
 
@@ -582,9 +582,9 @@ MOCKING_INSULT_REPLIES = [
 VICTINI_FRIENDLY_REPLIES = [
     "¡Acá estoy! 🔥✌️ Siempre vigilando que nadie se pase de vivo en **SNAP!** 👀",
     "¿Alguien me invocó? ✌️🔥 ¡Estoy al 100% al servicio de **SNAP!**",
-    f"¡Presente! 🔥 Si querés música usá `/victiniplay`, y si querés atrapar Pokémon pasate por `🎮𝑪𝑨𝑻𝑪𝑯` 👀",
-    f"¡Buenas! ✌️🔥 Recordá que cada nivel que subís te da **+1 Pokéball** para usar en `/catch` 🎱",
-    f"¿Qué onda? 👀🔥 Seguí charlando o activo en voz para subir en el `/ranking` de **SNAP!**",
+    "¡Presente! 🔥 Si querés música usá `/victiniplay`, y si querés atrapar Pokémon pasate por `🎮𝑪𝑨𝑻𝑪𝑯` 👀",
+    "¡Buenas! ✌️🔥 Recordá que cada nivel que subís te da **+1 Pokéball** para usar en `/catch` 🎱",
+    "¿Qué onda? 👀🔥 Seguí charlando o activo en voz para subir en el `/ranking` de **SNAP!**",
 ]
 
 
@@ -740,7 +740,7 @@ async def before_voice_xp_loop():
 
 
 # ==========================================
-# 2C. CHIVOS AUTOMÁTICOS CADA 4 HORAS EN 🛗𝑪𝑯𝑨𝑻-𝑮𝑬𝑵𝑬𝑹𝑨𝑳 Y COMANDO /chivo
+# 2C. CHIVOS AUTOMÁTICOS CADA 12 HORAS EN 🛗𝑪𝑯𝑨𝑻-𝑮𝑬𝑵𝑬𝑹𝑨𝑳 Y COMANDO /chivo
 # ==========================================
 _promo_next_idx = 0
 
@@ -769,15 +769,15 @@ def build_promo_payload(choice_idx: Optional[int] = None) -> tuple[str, discord.
         "👉 https://catalogo.snap-stock.com/snap/catalogo\n\n"
         "*O también en **TCG Fans*** 🎴🔥\n"
         "👉 https://tcg.fans/pokemon/profile/SNAP%21/products\n\n"
-        f"📍 ***¡También estamos todos los Sábados en Lo de Charly (`Chaco 21`)!*** *¡Te esperamos!* 🙌"
+        "📍 ***¡También estamos todos los Sábados en Lo de Charly (`Chaco 21`)!*** *¡Te esperamos!* 🙌"
     )
     png_bytes = build_snap_card_png()
     return text, discord.File(io.BytesIO(png_bytes), filename="snap_tcg.png")
 
 
-@tasks.loop(hours=4)
+@tasks.loop(hours=12)
 async def promo_loop():
-    # Evitar spamear inmediatamente al reiniciar/desplegar en Render; espera las primeras 4 horas
+    # Evitar spamear inmediatamente al reiniciar/desplegar en Render; espera las primeras 12 horas
     if promo_loop.current_loop == 0:
         return
 
