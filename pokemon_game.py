@@ -171,6 +171,196 @@ def roll_wild_pokemon() -> tuple[PokemonSpecies, bool]:
     return species, is_shiny
 
 
+_KNOWN_TYPES = (
+    "Normal", "Fuego", "Agua", "Planta", "Eléctrico", "Hielo",
+    "Lucha", "Veneno", "Tierra", "Volador", "Psíquico", "Bicho",
+    "Roca", "Fantasma", "Dragón", "Siniestro", "Acero", "Hada",
+)
+
+# Tabla oficial de efectividad de tipos: atacante -> {defensor: multiplicador}
+TYPE_CHART: dict[str, dict[str, float]] = {
+    "Normal": {"Roca": 0.5, "Fantasma": 0.30, "Acero": 0.5},
+    "Fuego": {"Fuego": 0.5, "Agua": 0.5, "Planta": 2.0, "Hielo": 2.0, "Bicho": 2.0, "Roca": 0.5, "Dragón": 0.5, "Acero": 2.0},
+    "Agua": {"Fuego": 2.0, "Agua": 0.5, "Planta": 0.5, "Tierra": 2.0, "Roca": 2.0, "Dragón": 0.5},
+    "Planta": {"Fuego": 0.5, "Agua": 2.0, "Planta": 0.5, "Veneno": 0.5, "Tierra": 2.0, "Volador": 0.5, "Bicho": 0.5, "Roca": 2.0, "Dragón": 0.5, "Acero": 0.5},
+    "Eléctrico": {"Agua": 2.0, "Planta": 0.5, "Eléctrico": 0.5, "Tierra": 0.30, "Volador": 2.0, "Dragón": 0.5},
+    "Hielo": {"Fuego": 0.5, "Agua": 0.5, "Planta": 2.0, "Hielo": 0.5, "Tierra": 2.0, "Volador": 2.0, "Dragón": 2.0, "Acero": 0.5},
+    "Lucha": {"Normal": 2.0, "Hielo": 2.0, "Veneno": 0.5, "Volador": 0.5, "Psíquico": 0.5, "Bicho": 0.5, "Roca": 2.0, "Fantasma": 0.30, "Siniestro": 2.0, "Acero": 2.0, "Hada": 0.5},
+    "Veneno": {"Planta": 2.0, "Veneno": 0.5, "Tierra": 0.5, "Roca": 0.5, "Fantasma": 0.5, "Acero": 0.30, "Hada": 2.0},
+    "Tierra": {"Fuego": 2.0, "Planta": 0.5, "Eléctrico": 2.0, "Veneno": 2.0, "Volador": 0.30, "Bicho": 0.5, "Roca": 2.0, "Acero": 2.0},
+    "Volador": {"Planta": 2.0, "Eléctrico": 0.5, "Lucha": 2.0, "Bicho": 2.0, "Roca": 0.5, "Acero": 0.5},
+    "Psíquico": {"Lucha": 2.0, "Veneno": 2.0, "Psíquico": 0.5, "Siniestro": 0.30, "Acero": 0.5},
+    "Bicho": {"Fuego": 0.5, "Planta": 2.0, "Lucha": 0.5, "Veneno": 0.5, "Volador": 0.5, "Psíquico": 2.0, "Fantasma": 0.5, "Siniestro": 2.0, "Acero": 0.5, "Hada": 0.5},
+    "Roca": {"Fuego": 2.0, "Hielo": 2.0, "Lucha": 0.5, "Tierra": 0.5, "Volador": 2.0, "Bicho": 2.0, "Acero": 0.5},
+    "Fantasma": {"Normal": 0.30, "Psíquico": 2.0, "Fantasma": 2.0, "Siniestro": 0.5},
+    "Dragón": {"Dragón": 2.0, "Acero": 0.5, "Hada": 0.30},
+    "Siniestro": {"Lucha": 0.5, "Psíquico": 2.0, "Fantasma": 2.0, "Siniestro": 0.5, "Hada": 0.5},
+    "Acero": {"Fuego": 0.5, "Agua": 0.5, "Eléctrico": 0.5, "Hielo": 2.0, "Roca": 2.0, "Acero": 0.5, "Hada": 2.0},
+    "Hada": {"Fuego": 0.5, "Lucha": 2.0, "Veneno": 0.5, "Dragón": 2.0, "Siniestro": 2.0, "Acero": 0.5},
+}
+
+_EVOLVED_FROM = {v["to_id"]: k for k, v in EVOLUTION_TABLE.items()}
+
+
+def _parse_types(ptype_str: str) -> List[str]:
+    found = [t for t in _KNOWN_TYPES if t.lower() in (ptype_str or "").lower()]
+    return found or ["Normal"]
+
+
+def get_type_multiplier(attacker_ptype: str, defender_ptype: str) -> float:
+    """Calcula el multiplicador de ventaja elemental del atacante frente al defensor (mejor tipo STAB)."""
+    atk_types = _parse_types(attacker_ptype)
+    def_types = _parse_types(defender_ptype)
+    best = 0.0
+    for at in atk_types:
+        chart = TYPE_CHART.get(at, {})
+        mult = 1.0
+        for dt in def_types:
+            mult *= chart.get(dt, 1.0)
+        if mult > best:
+            best = mult
+    return round(best, 2) if best > 0 else 1.0
+
+
+def get_evolution_stage(pokedex_id: int, rarity: str) -> int:
+    """Determina la fase evolutiva (1, 2 o 3) para escalar stats de combate."""
+    if pokedex_id in _EVOLVED_FROM:
+        prev_id = _EVOLVED_FROM[pokedex_id]
+        if prev_id in _EVOLVED_FROM:
+            return 3
+        if pokedex_id in EVOLUTION_TABLE:
+            return 2
+        return 3 if rarity in ("Épico", "Legendario") else 2
+    if pokedex_id in EVOLUTION_TABLE:
+        return 1
+    return 3 if rarity in ("Épico", "Legendario") else 2
+
+
+def compute_pokemon_combat_stats(
+    pokedex_id: int,
+    rarity: str,
+    ptype: str,
+    level: int,
+    is_shiny: bool = False,
+) -> dict:
+    """Calcula HP, ATK, DEF y VEL reales según rareza, fase evolutiva, tipo, nivel y Shiny."""
+    lvl = max(1, int(level))
+    stage = get_evolution_stage(pokedex_id, rarity)
+    base_bst = {"Común": 300, "Raro": 395, "Épico": 495, "Legendario": 620}.get(rarity, 340)
+    bst = base_bst + (stage - 1) * 70
+    if is_shiny:
+        bst = int(bst * 1.08)
+
+    types = _parse_types(ptype)
+    w_hp, w_atk, w_def, w_spd = 1.0, 1.0, 1.0, 1.0
+    for t in types:
+        if t in ("Fuego", "Dragón", "Lucha", "Siniestro"):
+            w_atk += 0.22
+        if t in ("Roca", "Acero", "Tierra", "Veneno"):
+            w_def += 0.22
+        if t in ("Eléctrico", "Volador", "Bicho", "Psíquico"):
+            w_spd += 0.22
+        if t in ("Agua", "Planta", "Normal", "Hada", "Hielo", "Fantasma"):
+            w_hp += 0.18
+
+    # Variación determinista suave por especie
+    seed = (pokedex_id * 37) % 13 - 6
+    total_w = w_hp + w_atk + w_def + w_spd
+    b_hp = max(35, int((bst * (w_hp / total_w)) / 3.8) + seed)
+    b_atk = max(35, int((bst * (w_atk / total_w)) / 3.8) - seed // 2)
+    b_def = max(35, int((bst * (w_def / total_w)) / 3.8) + seed // 2)
+    b_spd = max(35, int((bst * (w_spd / total_w)) / 3.8))
+
+    return {
+        "stage": stage,
+        "hp": int((b_hp * 2 * lvl) / 42) + lvl + 20,
+        "atk": int((b_atk * 2 * lvl) / 48) + 8,
+        "def": int((b_def * 2 * lvl) / 48) + 8,
+        "spd": int((b_spd * 2 * lvl) / 48) + 8,
+    }
+
+
+def roll_wild_level(team: List[dict], rarity: str) -> int:
+    """Genera el nivel del Pokémon salvaje al momento del encuentro (se conserva si se captura)."""
+    rarity_bonus = {"Común": 0, "Raro": 1, "Épico": 3, "Legendario": 5}.get(rarity, 0)
+    if not team:
+        return max(1, random.randint(1, 4) + rarity_bonus)
+    top_levels = sorted((int(m.get("poke_level", 1)) for m in team), reverse=True)[:3]
+    avg_lvl = sum(top_levels) / len(top_levels)
+    return max(1, min(65, int(round(avg_lvl)) + random.randint(-2, 3) + rarity_bonus))
+
+
+def simulate_pokemon_battle(fighter: dict, opponent: dict) -> dict:
+    """
+    Simula un combate por turnos teniendo en cuenta:
+    - Nivel, Stats (HP, ATK, DEF, VEL) y Fase Evolutiva
+    - Debilidades y resistencias elementales (TYPE_CHART)
+    - Golpes críticos y condición Shiny
+    """
+    f_stats = compute_pokemon_combat_stats(
+        fighter["pokedex_id"], fighter["rarity"], fighter["ptype"], fighter["level"], bool(fighter.get("is_shiny"))
+    )
+    o_stats = compute_pokemon_combat_stats(
+        opponent["pokedex_id"], opponent["rarity"], opponent["ptype"], opponent["level"], bool(opponent.get("is_shiny"))
+    )
+
+    f_mult = get_type_multiplier(fighter["ptype"], opponent["ptype"])
+    o_mult = get_type_multiplier(opponent["ptype"], fighter["ptype"])
+
+    f_hp = f_stats["hp"]
+    o_hp = o_stats["hp"]
+    turns = 0
+    f_first = f_stats["spd"] >= o_stats["spd"]
+
+    def _hit(atk_val: int, def_val: int, mult: float) -> int:
+        crit = 1.5 if random.random() < 0.08 else 1.0
+        raw = ((atk_val / max(1, def_val)) * 13.5 + 5.5) * mult * crit * random.uniform(0.88, 1.12)
+        return max(3, int(round(raw)))
+
+    while f_hp > 0 and o_hp > 0 and turns < 20:
+        turns += 1
+        if f_first:
+            o_hp = max(0, o_hp - _hit(f_stats["atk"], o_stats["def"], f_mult))
+            if o_hp <= 0:
+                break
+            f_hp = max(0, f_hp - _hit(o_stats["atk"], o_stats["def"], o_mult))
+        else:
+            f_hp = max(0, f_hp - _hit(o_stats["atk"], o_stats["def"], o_mult))
+            if f_hp <= 0:
+                break
+            o_hp = max(0, o_hp - _hit(f_stats["atk"], o_stats["def"], f_mult))
+
+    won = o_hp == 0 or (f_hp > o_hp)
+
+    eff_notes = []
+    if f_mult >= 2.0:
+        eff_notes.append(f"⚡ *¡Tu ataque fue **súper eficaz** (`x{f_mult:g}`)!*")
+    elif f_mult < 1.0:
+        eff_notes.append(f"🛡️ *El rival resistió tu tipo (`x{f_mult:g}`).*")
+    if o_mult >= 2.0:
+        eff_notes.append(f"⚠️ *El rival tuvo ventaja de tipo (`x{o_mult:g}`).*")
+
+    summary = (
+        f"📊 **Stats ({fighter['name']} Fase {f_stats['stage']}):** "
+        f"`HP {f_stats['hp']} | ATK {f_stats['atk']} | DEF {f_stats['def']} | VEL {f_stats['spd']}` "
+        f"*(HP restante: **{f_hp}/{f_stats['hp']}** en {turns} turnos)*"
+    )
+    if eff_notes:
+        summary = " ".join(eff_notes) + "\n" + summary
+
+    return {
+        "won": won,
+        "turns": turns,
+        "f_stats": f_stats,
+        "o_stats": o_stats,
+        "f_hp": f_hp,
+        "o_hp": o_hp,
+        "f_mult": f_mult,
+        "o_mult": o_mult,
+        "summary": summary,
+    }
+
+
 def _load_font(size: int, bold: bool = False):
     """Carga una fuente TTF disponible en Linux (Render) o Windows, con fallback seguro a Pillow."""
     candidates = (
@@ -438,6 +628,7 @@ class ReplacePokemonView(discord.ui.View):
         is_shiny: bool,
         team: List[dict],
         on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+        wild_level: int = 1,
     ):
         super().__init__(timeout=120)
         self.guild = guild
@@ -446,10 +637,11 @@ class ReplacePokemonView(discord.ui.View):
         self.is_shiny = is_shiny
         self.team = team
         self.on_backup = on_backup
+        self.wild_level = max(1, int(wild_level))
 
         for idx, mon in enumerate(team[:6], start=1):
             shiny_tag = "✨ " if mon["is_shiny"] else ""
-            label = f"{idx}. {shiny_tag}{mon['name']} ({mon['rarity']})"
+            label = f"{idx}. {shiny_tag}{mon['name']} (Nv. {mon.get('poke_level', 1)})"
             btn = discord.ui.Button(label=label[:80], style=discord.ButtonStyle.secondary, row=(idx - 1) // 3)
             btn.callback = self._make_replace_callback(mon)
             self.add_item(btn)
@@ -477,6 +669,7 @@ class ReplacePokemonView(discord.ui.View):
                 ptype=self.species.ptype,
                 is_shiny=self.is_shiny,
                 caught_at=time.time(),
+                poke_level=self.wild_level,
             )
 
             for item in self.children:
@@ -489,7 +682,7 @@ class ReplacePokemonView(discord.ui.View):
                     title="🔄 ¡Equipo actualizado en SNAP! 🔥",
                     description=(
                         f"Liberaste a **{shiny_old}{mon_to_release['name']}** en la naturaleza 🕊️ "
-                        f"y sumaste a **{shiny_new}{self.species.name}** (`{self.species.rarity}`) a tu equipo (6/6)!"
+                        f"y sumaste a **{shiny_new}{self.species.name}** (**Nv. {self.wild_level}** | `{self.species.rarity}`) a tu equipo (6/6)!"
                     ),
                     color=RARITY_CONFIG[self.species.rarity]["color"],
                 )
@@ -532,6 +725,7 @@ class PostCaptureDecisionView(discord.ui.View):
         is_shiny: bool,
         team: List[dict],
         on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+        wild_level: int = 1,
     ):
         super().__init__(timeout=120)
         self.guild = guild
@@ -540,6 +734,7 @@ class PostCaptureDecisionView(discord.ui.View):
         self.is_shiny = is_shiny
         self.team = team
         self.on_backup = on_backup
+        self.wild_level = max(1, int(wild_level))
 
         if len(team) >= 6:
             self.keep_btn.label = "🔄 Quedármelo (elegir a cuál liberar)"
@@ -564,7 +759,7 @@ class PostCaptureDecisionView(discord.ui.View):
                 title="🎒 ¡Tu equipo está lleno (6/6)! 🔄",
                 description=(
                     f"Elegí qué Pokémon de tu equipo querés **liberar** para hacerle lugar a "
-                    f"**{shiny_tag}{self.species.name}** (`{self.species.rarity}`):"
+                    f"**{shiny_tag}{self.species.name}** (**Nv. {self.wild_level}** | `{self.species.rarity}`):"
                 ),
                 color=discord.Color.orange(),
             )
@@ -576,6 +771,7 @@ class PostCaptureDecisionView(discord.ui.View):
                 is_shiny=self.is_shiny,
                 team=current_team,
                 on_backup=self.on_backup,
+                wild_level=self.wild_level,
             )
             await interaction.response.edit_message(embed=embed, view=replace_view)
             return
@@ -589,6 +785,7 @@ class PostCaptureDecisionView(discord.ui.View):
             ptype=self.species.ptype,
             is_shiny=self.is_shiny,
             caught_at=time.time(),
+            poke_level=self.wild_level,
         )
 
         for item in self.children:
@@ -600,7 +797,7 @@ class PostCaptureDecisionView(discord.ui.View):
             embed = discord.Embed(
                 title="🎉 ¡Pokémon guardado en tu equipo! 🔥",
                 description=(
-                    f"**{shiny_tag}{self.species.name}** (`{self.species.rarity}`) se unió a tu equipo "
+                    f"**{shiny_tag}{self.species.name}** (**Nv. {self.wild_level}** | `{self.species.rarity}`) se unió a tu equipo "
                     f"(`{new_count}/6`). ¡Victini te felicita! ✌️"
                 ),
                 color=RARITY_CONFIG[self.species.rarity]["color"],
@@ -642,6 +839,7 @@ class PostBattleCatchView(discord.ui.View):
         is_shiny: bool,
         pokeballs: int,
         on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+        wild_level: int = 1,
     ):
         super().__init__(timeout=120)
         self.guild = guild
@@ -649,6 +847,7 @@ class PostBattleCatchView(discord.ui.View):
         self.species = species
         self.is_shiny = is_shiny
         self.on_backup = on_backup
+        self.wild_level = max(1, int(wild_level))
 
         base_rate = RARITY_CONFIG[species.rarity]["catch_rate"]
         boosted_pct = int(min(0.98, base_rate + 0.20) * 100)
@@ -703,6 +902,7 @@ class PostBattleCatchView(discord.ui.View):
             is_shiny=self.is_shiny,
             team=team,
             on_backup=self.on_backup,
+            wild_level=self.wild_level,
         )
 
         extra_note = (
@@ -712,10 +912,10 @@ class PostBattleCatchView(discord.ui.View):
         )
 
         embed = discord.Embed(
-            title=f"🎉 ¡ATRAPASTE A {shiny_tag}{self.species.name.upper()}! 🔥",
+            title=f"🎉 ¡ATRAPASTE A {shiny_tag}{self.species.name.upper()} (Nv. {self.wild_level})! 🔥",
             description=(
                 f"{cfg['emoji']} **Rareza:** {self.species.rarity} | **Tipo:** {self.species.ptype}\n"
-                f"🎱 **Pokéballs restantes:** {remaining}"
+                f"⭐ **Nivel capturado:** Nv. {self.wild_level} | 🎱 **Pokéballs restantes:** {remaining}"
                 f"{extra_note}"
             ),
             color=cfg["color"],
@@ -798,6 +998,7 @@ class ChooseFighterView(discord.ui.View):
         pokeballs: int,
         team: list[dict],
         on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+        wild_level: int = 1,
     ):
         super().__init__(timeout=120)
         self.guild = guild
@@ -807,6 +1008,7 @@ class ChooseFighterView(discord.ui.View):
         self.pokeballs = pokeballs
         self.team = team
         self.on_backup = on_backup
+        self.wild_level = max(1, int(wild_level))
 
         for idx, mon in enumerate(team[:6], start=1):
             shiny_tag = "✨ " if mon.get("is_shiny") else ""
@@ -834,17 +1036,30 @@ class ChooseFighterView(discord.ui.View):
                 return
 
             fighter_lvl = int(mon.get("poke_level", 1))
-            fighter_power = RARITY_POWER.get(mon["rarity"], 10) + fighter_lvl * 3 + (5 if mon.get("is_shiny") else 0)
-
             wild_cfg = RARITY_CONFIG[self.species.rarity]
+            wild_level = self.wild_level
+
+            battle = simulate_pokemon_battle(
+                fighter={
+                    "pokedex_id": mon["pokedex_id"],
+                    "name": mon["name"],
+                    "rarity": mon["rarity"],
+                    "ptype": mon["ptype"],
+                    "level": fighter_lvl,
+                    "is_shiny": bool(mon.get("is_shiny")),
+                },
+                opponent={
+                    "pokedex_id": self.species.pokedex_id,
+                    "name": self.species.name,
+                    "rarity": self.species.rarity,
+                    "ptype": self.species.ptype,
+                    "level": wild_level,
+                    "is_shiny": self.is_shiny,
+                },
+            )
+            won = battle["won"]
+
             wild_base_power = RARITY_POWER.get(self.species.rarity, 10)
-            wild_level = max(1, min(35, fighter_lvl + random.randint(-2, 3)))
-            wild_power = wild_base_power + wild_level * 3 + (4 if self.is_shiny else 0)
-
-            win_chance = 0.50 + (fighter_power - wild_power) * 0.025
-            win_chance = max(0.25, min(0.92, win_chance))
-            won = random.random() <= win_chance
-
             base_xp = max(18, wild_base_power + wild_level * 4)
             xp_gain = base_xp if won else max(8, base_xp // 3)
 
@@ -898,6 +1113,8 @@ class ChooseFighterView(discord.ui.View):
                     title=f"⚔️ ¡VICTORIA DE {shiny_f}{new_name.upper()}! 🔥",
                     description=(
                         f"Tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*) derrotó a **{shiny_w}{self.species.name}** (*Nv. {wild_level}* | {wild_cfg['emoji']} {self.species.rarity}).\n\n"
+                        + battle["summary"]
+                        + "\n\n"
                         + "\n".join(progress_lines)
                         + "\n\n*¡El Pokémon salvaje quedó debilitado! Podés intentar capturarlo con **+20% de probabilidad** o terminar.*"
                     ),
@@ -913,6 +1130,7 @@ class ChooseFighterView(discord.ui.View):
                     is_shiny=self.is_shiny,
                     pokeballs=self.pokeballs,
                     on_backup=self.on_backup,
+                    wild_level=self.wild_level,
                 )
                 await interaction.response.edit_message(embed=embed, view=next_view)
             else:
@@ -922,6 +1140,8 @@ class ChooseFighterView(discord.ui.View):
                     title=f"💥 ¡{shiny_w}{self.species.name} fue demasiado fuerte!",
                     description=(
                         f"Tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*) cayó en combate ante **{shiny_w}{self.species.name}** (*Nv. {wild_level}*), pero igual aprendió de la batalla:\n\n"
+                        + battle["summary"]
+                        + "\n\n"
                         + "\n".join(progress_lines)
                     ),
                     color=discord.Color.orange(),
@@ -940,10 +1160,10 @@ class ChooseFighterView(discord.ui.View):
         cfg = RARITY_CONFIG[self.species.rarity]
         shiny_text = "✨ **¡SHINY!** ✨\n" if self.is_shiny else ""
         embed = discord.Embed(
-            title=f"🌿 ¡Un {self.species.name} salvaje apareció!",
+            title=f"🌿 ¡Un {self.species.name} salvaje (Nv. {self.wild_level}) apareció!",
             description=(
                 f"{shiny_text}"
-                f"{cfg['emoji']} **Rareza:** {self.species.rarity}\n"
+                f"{cfg['emoji']} **Rareza:** {self.species.rarity} | ⭐ **Nivel:** Nv. {self.wild_level}\n"
                 f"🔥 **Tipo:** {self.species.ptype}\n"
                 f"🎯 **Probabilidad de captura:** {int(cfg['catch_rate'] * 100)}%\n\n"
                 f"*¿Querés lanzar una Pokéball, pelear con tu equipo o huir?*"
@@ -960,6 +1180,7 @@ class ChooseFighterView(discord.ui.View):
             is_shiny=self.is_shiny,
             pokeballs=self.pokeballs,
             on_backup=self.on_backup,
+            wild_level=self.wild_level,
         )
         await interaction.response.edit_message(embed=embed, view=encounter_view)
 
@@ -975,6 +1196,7 @@ class WildEncounterView(discord.ui.View):
         is_shiny: bool,
         pokeballs: int,
         on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+        wild_level: int = 1,
     ):
         super().__init__(timeout=120)
         self.guild = guild
@@ -983,6 +1205,7 @@ class WildEncounterView(discord.ui.View):
         self.is_shiny = is_shiny
         self.pokeballs = pokeballs
         self.on_backup = on_backup
+        self.wild_level = max(1, int(wild_level))
 
         self.throw_btn.label = f"🔴 ¡Lanzar Pokéball! (Tenés {pokeballs})"
 
@@ -1034,6 +1257,7 @@ class WildEncounterView(discord.ui.View):
             is_shiny=self.is_shiny,
             team=team,
             on_backup=self.on_backup,
+            wild_level=self.wild_level,
         )
 
         extra_note = (
@@ -1043,10 +1267,10 @@ class WildEncounterView(discord.ui.View):
         )
 
         embed = discord.Embed(
-            title=f"🎉 ¡ATRAPASTE A {shiny_tag}{self.species.name.upper()}! 🔥",
+            title=f"🎉 ¡ATRAPASTE A {shiny_tag}{self.species.name.upper()} (Nv. {self.wild_level})! 🔥",
             description=(
                 f"{cfg['emoji']} **Rareza:** {self.species.rarity} | **Tipo:** {self.species.ptype}\n"
-                f"🎱 **Pokéballs restantes:** {remaining}"
+                f"⭐ **Nivel capturado:** Nv. {self.wild_level} | 🎱 **Pokéballs restantes:** {remaining}"
                 f"{extra_note}"
             ),
             color=cfg["color"],
@@ -1090,6 +1314,7 @@ class WildEncounterView(discord.ui.View):
             pokeballs=self.pokeballs,
             team=team,
             on_backup=self.on_backup,
+            wild_level=self.wild_level,
         )
         await interaction.response.edit_message(embed=embed, view=choose_view)
 
@@ -1246,12 +1471,25 @@ class TrainerBattleView(discord.ui.View):
                 if self.mode == "battle"
                 else self.opponent.level
             )
-            fighter_power = RARITY_POWER.get(mon["rarity"], 10) + fighter_lvl * 3 + (5 if mon.get("is_shiny") else 0)
-            opp_power = RARITY_POWER.get(self.opponent.rarity, 12) + opp_level * 3
-
-            win_chance = 0.52 + (fighter_power - opp_power) * 0.025
-            win_chance = max(0.20, min(0.92, win_chance))
-            won = random.random() <= win_chance
+            battle = simulate_pokemon_battle(
+                fighter={
+                    "pokedex_id": mon["pokedex_id"],
+                    "name": mon["name"],
+                    "rarity": mon["rarity"],
+                    "ptype": mon["ptype"],
+                    "level": fighter_lvl,
+                    "is_shiny": bool(mon.get("is_shiny")),
+                },
+                opponent={
+                    "pokedex_id": self.opponent.pokemon_id,
+                    "name": self.opponent.pokemon_name,
+                    "rarity": self.opponent.rarity,
+                    "ptype": self.opponent.ptype,
+                    "level": opp_level,
+                    "is_shiny": False,
+                },
+            )
+            won = battle["won"]
 
             xp_gain = self.opponent.xp_win if won else self.opponent.xp_loss
             xp_res = add_pokemon_xp(
@@ -1363,6 +1601,8 @@ class TrainerBattleView(discord.ui.View):
                     title=f"🏆 ¡VICTORIA CONTRA {self.opponent.name.upper()}! 🔥",
                     description=(
                         f"Tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*) venció al **{self.opponent.pokemon_name}** (*Nv. {opp_level}*) de **{self.opponent.name}** (*{self.opponent.title}*).\n\n"
+                        + battle["summary"]
+                        + "\n\n"
                         + "\n".join(reward_lines)
                     ),
                     color=discord.Color.gold() if (evolved or self.mode in ("gym", "league")) else discord.Color.green(),
@@ -1372,6 +1612,8 @@ class TrainerBattleView(discord.ui.View):
                     title=f"💥 ¡DERROTA ANTE {self.opponent.name.upper()}!",
                     description=(
                         f"El **{self.opponent.pokemon_name}** (*Nv. {opp_level}*) de **{self.opponent.name}** (*{self.opponent.title}*) superó a tu **{shiny_f}{old_name}** (*Nv. {fighter_lvl}*).\n\n"
+                        + battle["summary"]
+                        + "\n\n"
                         + "\n".join(reward_lines)
                         + "\n\n*¡Igual sumaste experiencia de entrenamiento! Subí de nivel y volvé por la revancha.*"
                     ),
@@ -1598,14 +1840,17 @@ def setup_pokemon_commands(
             return
 
         species, is_shiny = roll_wild_pokemon()
+        user_team = get_pokemon_team(interaction.guild.id, interaction.user.id)
+        wild_level = roll_wild_level(user_team, species.rarity)
         cfg = RARITY_CONFIG[species.rarity]
         shiny_tag = "✨ SHINY " if is_shiny else ""
         pct = int(cfg["catch_rate"] * 100)
 
         embed = discord.Embed(
-            title=f"🌿 ¡Victini encontró un {shiny_tag}{species.name} salvaje! 🔥",
+            title=f"🌿 ¡Victini encontró un {shiny_tag}{species.name} salvaje (Nv. {wild_level})! 🔥",
             description=(
                 f"¡Mirá quién apareció entre las llamas de **SNAP!** 👀\n\n"
+                f"⭐ **Nivel:** Nv. {wild_level}\n"
                 f"{cfg['emoji']} **Rareza:** {species.rarity} *(Probabilidad de captura: **{pct}%**)*\n"
                 f"🏷️ **Tipo:** {species.ptype}\n"
                 f"🎱 **Tus Pokéballs:** {pokeballs}"
@@ -1613,7 +1858,7 @@ def setup_pokemon_commands(
             color=cfg["color"],
         )
         embed.set_image(url=get_artwork_url(species.pokedex_id, is_shiny))
-        embed.set_footer(text="¿Le tiramos una Pokéball? • Victini Bot 🔥✌️")
+        embed.set_footer(text="¿Le tiramos una Pokéball o peleamos? • Victini Bot 🔥✌️")
 
         view = WildEncounterView(
             guild=interaction.guild,
@@ -1622,6 +1867,7 @@ def setup_pokemon_commands(
             is_shiny=is_shiny,
             pokeballs=pokeballs,
             on_backup=on_backup,
+            wild_level=wild_level,
         )
         await interaction.response.send_message(embed=embed, view=view)
 
