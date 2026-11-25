@@ -78,9 +78,11 @@ def init_db() -> None:
             )
             cursor.execute("ALTER TABLE user_pokemon ADD COLUMN IF NOT EXISTS poke_level INTEGER NOT NULL DEFAULT 1")
             cursor.execute("ALTER TABLE user_pokemon ADD COLUMN IF NOT EXISTS poke_xp INTEGER NOT NULL DEFAULT 0")
+            cursor.execute("ALTER TABLE user_pokemon ADD COLUMN IF NOT EXISTS in_pc INTEGER NOT NULL DEFAULT 0")
             cursor.execute("ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS gym_badges INTEGER NOT NULL DEFAULT 0")
             cursor.execute("ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS league_stage INTEGER NOT NULL DEFAULT 0")
             cursor.execute("ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS league_wins INTEGER NOT NULL DEFAULT 0")
+            cursor.execute("ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS rare_candies INTEGER NOT NULL DEFAULT 0")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_tcg_cards (
@@ -131,6 +133,8 @@ def init_db() -> None:
                 cursor.execute("ALTER TABLE user_levels ADD COLUMN league_stage INTEGER NOT NULL DEFAULT 0")
             if "league_wins" not in columns:
                 cursor.execute("ALTER TABLE user_levels ADD COLUMN league_wins INTEGER NOT NULL DEFAULT 0")
+            if "rare_candies" not in columns:
+                cursor.execute("ALTER TABLE user_levels ADD COLUMN rare_candies INTEGER NOT NULL DEFAULT 0")
 
             cursor.execute(
                 """
@@ -145,7 +149,8 @@ def init_db() -> None:
                     is_shiny INTEGER NOT NULL DEFAULT 0,
                     caught_at REAL NOT NULL DEFAULT 0,
                     poke_level INTEGER NOT NULL DEFAULT 1,
-                    poke_xp INTEGER NOT NULL DEFAULT 0
+                    poke_xp INTEGER NOT NULL DEFAULT 0,
+                    in_pc INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -155,6 +160,8 @@ def init_db() -> None:
                 cursor.execute("ALTER TABLE user_pokemon ADD COLUMN poke_level INTEGER NOT NULL DEFAULT 1")
             if "poke_xp" not in p_cols:
                 cursor.execute("ALTER TABLE user_pokemon ADD COLUMN poke_xp INTEGER NOT NULL DEFAULT 0")
+            if "in_pc" not in p_cols:
+                cursor.execute("ALTER TABLE user_pokemon ADD COLUMN in_pc INTEGER NOT NULL DEFAULT 0")
 
             cursor.execute(
                 """
@@ -469,7 +476,7 @@ def get_pokemon_team(guild_id: int, user_id: int) -> List[dict]:
                 """
                 SELECT id, pokedex_id, name, rarity, ptype, is_shiny, caught_at, poke_level, poke_xp
                 FROM user_pokemon
-                WHERE guild_id = ? AND user_id = ?
+                WHERE guild_id = ? AND user_id = ? AND in_pc = 0
                 ORDER BY id ASC
                 """
             ),
@@ -489,6 +496,341 @@ def get_pokemon_team(guild_id: int, user_id: int) -> List[dict]:
             }
             for r in cursor.fetchall()
         ]
+
+
+def get_pc_pokemon(guild_id: int, user_id: int) -> List[dict]:
+    """Retorna la lista de Pokémon almacenados en la PC de Bill (in_pc = 1, máx 30)."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql(
+                """
+                SELECT id, pokedex_id, name, rarity, ptype, is_shiny, caught_at, poke_level, poke_xp
+                FROM user_pokemon
+                WHERE guild_id = ? AND user_id = ? AND in_pc = 1
+                ORDER BY id ASC
+                """
+            ),
+            (guild_id, user_id),
+        )
+        return [
+            {
+                "id": r[0],
+                "pokedex_id": r[1],
+                "name": r[2],
+                "rarity": r[3],
+                "ptype": r[4],
+                "is_shiny": bool(r[5]),
+                "caught_at": r[6],
+                "poke_level": int(r[7] if r[7] is not None else 1),
+                "poke_xp": int(r[8] if r[8] is not None else 0),
+            }
+            for r in cursor.fetchall()
+        ]
+
+
+def get_total_pokemon_count(guild_id: int, user_id: int) -> int:
+    """Retorna la cantidad total de Pokémon del entrenador (equipo + PC de Bill)."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("SELECT COUNT(*) FROM user_pokemon WHERE guild_id = ? AND user_id = ?"),
+            (guild_id, user_id),
+        )
+        return int(cursor.fetchone()[0])
+
+
+def add_pokemon_to_pc(
+    guild_id: int,
+    user_id: int,
+    pokedex_id: int,
+    name: str,
+    rarity: str,
+    ptype: str,
+    is_shiny: bool,
+    caught_at: float,
+    poke_level: int = 1,
+) -> bool:
+    """Guarda un Pokémon directamente en la PC de Bill (hasta 36 en total entre equipo y PC)."""
+    lvl = max(1, int(poke_level))
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("SELECT COUNT(*) FROM user_pokemon WHERE guild_id = ? AND user_id = ?"),
+            (guild_id, user_id),
+        )
+        total = int(cursor.fetchone()[0])
+        if total >= 36:
+            return False
+        cursor.execute(
+            _sql(
+                """
+                INSERT INTO user_pokemon (guild_id, user_id, pokedex_id, name, rarity, ptype, is_shiny, caught_at, poke_level, poke_xp, in_pc)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
+                """
+            ),
+            (guild_id, user_id, pokedex_id, name, rarity, ptype, 1 if is_shiny else 0, caught_at, lvl),
+        )
+        conn.commit()
+        return True
+
+
+def move_pokemon_to_pc(row_id: int, guild_id: int, user_id: int) -> Tuple[bool, str]:
+    """Mueve un Pokémon del equipo activo a la PC de Bill (requiere dejar al menos 1 en el equipo)."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("SELECT COUNT(*) FROM user_pokemon WHERE guild_id = ? AND user_id = ? AND in_pc = 0"),
+            (guild_id, user_id),
+        )
+        team_cnt = int(cursor.fetchone()[0])
+        if team_cnt <= 1:
+            return False, "No podés dejar tu equipo vacío (necesitás al menos 1 Pokémon activo)."
+        cursor.execute(
+            _sql("SELECT COUNT(*) FROM user_pokemon WHERE guild_id = ? AND user_id = ? AND in_pc = 1"),
+            (guild_id, user_id),
+        )
+        pc_cnt = int(cursor.fetchone()[0])
+        if pc_cnt >= 30:
+            return False, "Tu PC de Bill está llena (`30/30`)."
+        cursor.execute(
+            _sql("UPDATE user_pokemon SET in_pc = 1 WHERE id = ? AND guild_id = ? AND user_id = ? AND in_pc = 0"),
+            (row_id, guild_id, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0, "Movido a la PC de Bill."
+
+
+def move_pokemon_to_team(row_id: int, guild_id: int, user_id: int) -> Tuple[bool, str]:
+    """Mueve un Pokémon de la PC de Bill al equipo activo (si hay menos de 6)."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("SELECT COUNT(*) FROM user_pokemon WHERE guild_id = ? AND user_id = ? AND in_pc = 0"),
+            (guild_id, user_id),
+        )
+        team_cnt = int(cursor.fetchone()[0])
+        if team_cnt >= 6:
+            return False, "Tu equipo activo ya está lleno (`6/6`). Mové uno a la PC o usá intercambiar."
+        cursor.execute(
+            _sql("UPDATE user_pokemon SET in_pc = 0 WHERE id = ? AND guild_id = ? AND user_id = ? AND in_pc = 1"),
+            (row_id, guild_id, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0, "Agregado a tu equipo activo."
+
+
+def swap_team_and_pc(team_row_id: int, pc_row_id: int, guild_id: int, user_id: int) -> bool:
+    """Intercambia un Pokémon del equipo activo con uno almacenado en la PC de Bill."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("UPDATE user_pokemon SET in_pc = 1 WHERE id = ? AND guild_id = ? AND user_id = ? AND in_pc = 0"),
+            (team_row_id, guild_id, user_id),
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return False
+        cursor.execute(
+            _sql("UPDATE user_pokemon SET in_pc = 0 WHERE id = ? AND guild_id = ? AND user_id = ? AND in_pc = 1"),
+            (pc_row_id, guild_id, user_id),
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return False
+        conn.commit()
+        return True
+
+
+def release_pokemon_by_id(row_id: int, guild_id: int, user_id: int) -> bool:
+    """Libera un Pokémon específico (de PC o equipo si hay >1)."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("DELETE FROM user_pokemon WHERE id = ? AND guild_id = ? AND user_id = ?"),
+            (row_id, guild_id, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_rare_candies(guild_id: int, user_id: int) -> int:
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("SELECT rare_candies FROM user_levels WHERE guild_id = ? AND user_id = ?"),
+            (guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        return int(row[0] or 0) if row else 0
+
+
+def add_rare_candy(guild_id: int, user_id: int, amount: int = 1, username: str = "Miembro") -> int:
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("SELECT rare_candies FROM user_levels WHERE guild_id = ? AND user_id = ?"),
+            (guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            new_total = amount
+            cursor.execute(
+                _sql(
+                    """
+                    INSERT INTO user_levels (guild_id, user_id, username, xp, level, last_xp_timestamp, pokeballs, rare_candies)
+                    VALUES (?, ?, ?, 0, 1, 0, 0, ?)
+                    """
+                ),
+                (guild_id, user_id, username, new_total),
+            )
+        else:
+            new_total = int(row[0] or 0) + amount
+            cursor.execute(
+                _sql("UPDATE user_levels SET rare_candies = ? WHERE guild_id = ? AND user_id = ?"),
+                (new_total, guild_id, user_id),
+            )
+        conn.commit()
+        return new_total
+
+
+def consume_rare_candy(guild_id: int, user_id: int) -> Tuple[bool, int]:
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("SELECT rare_candies FROM user_levels WHERE guild_id = ? AND user_id = ?"),
+            (guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        cur = int(row[0] or 0) if row else 0
+        if cur <= 0:
+            return False, 0
+        rem = cur - 1
+        cursor.execute(
+            _sql("UPDATE user_levels SET rare_candies = ? WHERE guild_id = ? AND user_id = ?"),
+            (rem, guild_id, user_id),
+        )
+        conn.commit()
+        return True, rem
+
+
+def grant_server_levels(guild_id: int, user_id: int, levels: int = 1, username: str = "Miembro") -> Tuple[bool, int]:
+    """Sube `levels` niveles completos de servidor y otorga +levels Pokéballs."""
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql("SELECT level, pokeballs FROM user_levels WHERE guild_id = ? AND user_id = ?"),
+            (guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            new_level = 1 + levels
+            new_balls = levels
+            cursor.execute(
+                _sql(
+                    """
+                    INSERT INTO user_levels (guild_id, user_id, username, xp, level, last_xp_timestamp, pokeballs)
+                    VALUES (?, ?, ?, 0, ?, 0, ?)
+                    """
+                ),
+                (guild_id, user_id, username, new_level, new_balls),
+            )
+        else:
+            new_level = int(row[0] or 1) + levels
+            new_balls = int(row[1] or 0) + levels
+            cursor.execute(
+                _sql("UPDATE user_levels SET level = ?, pokeballs = ?, username = ? WHERE guild_id = ? AND user_id = ?"),
+                (new_level, new_balls, username, guild_id, user_id),
+            )
+        conn.commit()
+        return True, new_level
+
+
+def apply_rare_candy_to_pokemon(
+    row_id: int,
+    guild_id: int,
+    user_id: int,
+    levels: int = 10,
+    evolution_table: Optional[dict] = None,
+    chosen_evo_id: Optional[int] = None,
+) -> Optional[dict]:
+    """
+    Sube `levels` niveles a un Pokémon al usar Rare Candy.
+    Si tiene múltiples ramas evolutivas (ej. Eevee) y no se pasó `chosen_evo_id`,
+    aplica el nivel y retorna `pending_choices` para que el entrenador elija su evolución.
+    """
+    import random
+    with closing(_get_conn()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _sql(
+                """
+                SELECT pokedex_id, name, rarity, ptype, is_shiny, poke_level, poke_xp
+                FROM user_pokemon
+                WHERE id = ? AND guild_id = ? AND user_id = ?
+                """
+            ),
+            (row_id, guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        pid, name, rarity, ptype, is_shiny, p_level, p_xp = row
+        old_level = int(p_level or 1)
+        p_level = old_level + levels
+        old_name = name
+        evolved = False
+        pending_choices = []
+
+        if evolution_table:
+            while pid in evolution_table:
+                raw_evos = evolution_table[pid]
+                evo_list = raw_evos if isinstance(raw_evos, list) else [raw_evos]
+                eligible = [e for e in evo_list if p_level >= e["min_level"]]
+                if not eligible:
+                    break
+                if len(eligible) > 1:
+                    if chosen_evo_id is not None:
+                        match = [e for e in eligible if e["to_id"] == chosen_evo_id]
+                        evo = match[0] if match else random.choice(eligible)
+                    else:
+                        pending_choices = eligible
+                        break
+                else:
+                    evo = eligible[0]
+
+                pid = evo["to_id"]
+                name = evo["to_name"]
+                ptype = evo["to_type"]
+                if evo.get("to_rarity"):
+                    rarity = evo["to_rarity"]
+                evolved = True
+
+        cursor.execute(
+            _sql(
+                """
+                UPDATE user_pokemon
+                SET pokedex_id = ?, name = ?, rarity = ?, ptype = ?, poke_level = ?, poke_xp = ?
+                WHERE id = ? AND guild_id = ? AND user_id = ?
+                """
+            ),
+            (pid, name, rarity, ptype, p_level, int(p_xp or 0), row_id, guild_id, user_id),
+        )
+        conn.commit()
+        return {
+            "id": row_id,
+            "pokedex_id": pid,
+            "name": name,
+            "old_name": old_name,
+            "rarity": rarity,
+            "ptype": ptype,
+            "is_shiny": bool(is_shiny),
+            "old_level": old_level,
+            "new_level": p_level,
+            "evolved": evolved,
+            "pending_choices": pending_choices,
+        }
 
 
 def poke_xp_for_next_level(poke_level: int) -> int:
@@ -536,17 +878,20 @@ def add_pokemon_xp(
         old_name = name
         evolved = False
         if evolution_table:
+            import random
             while pid in evolution_table:
-                evo = evolution_table[pid]
-                if p_level >= evo["min_level"]:
-                    pid = evo["to_id"]
-                    name = evo["to_name"]
-                    ptype = evo["to_type"]
-                    if evo.get("to_rarity"):
-                        rarity = evo["to_rarity"]
-                    evolved = True
-                else:
+                raw_evos = evolution_table[pid]
+                evo_list = raw_evos if isinstance(raw_evos, list) else [raw_evos]
+                eligible = [e for e in evo_list if p_level >= e["min_level"]]
+                if not eligible:
                     break
+                evo = random.choice(eligible)
+                pid = evo["to_id"]
+                name = evo["to_name"]
+                ptype = evo["to_type"]
+                if evo.get("to_rarity"):
+                    rarity = evo["to_rarity"]
+                evolved = True
 
         cursor.execute(
             _sql(
@@ -592,7 +937,7 @@ def add_pokemon_to_team(
     with closing(_get_conn()) as conn:
         cursor = conn.cursor()
         cursor.execute(
-            _sql("SELECT COUNT(*) FROM user_pokemon WHERE guild_id = ? AND user_id = ?"),
+            _sql("SELECT COUNT(*) FROM user_pokemon WHERE guild_id = ? AND user_id = ? AND in_pc = 0"),
             (guild_id, user_id),
         )
         count = cursor.fetchone()[0]
@@ -701,6 +1046,7 @@ def get_global_web_leaderboard(limit: int = 50) -> List[dict]:
                 """
                 SELECT guild_id, user_id, pokedex_id, name, rarity, is_shiny, poke_level
                 FROM user_pokemon
+                WHERE in_pc = 0
                 ORDER BY id ASC
                 """
             )
