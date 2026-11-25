@@ -20,12 +20,30 @@ from database import (
     consume_pokeball,
     add_pokeballs,
     get_pokemon_team,
+    get_pc_pokemon,
+    get_total_pokemon_count,
     add_pokemon_to_team,
+    add_pokemon_to_pc,
     replace_pokemon_in_team,
+    move_pokemon_to_pc,
+    move_pokemon_to_team,
+    swap_team_and_pc,
+    release_pokemon_by_id,
     add_pokemon_xp,
     get_user_stats,
     get_trainer_progress,
     update_trainer_progress,
+    get_rare_candies,
+    add_rare_candy,
+    consume_rare_candy,
+    grant_server_levels,
+    apply_rare_candy_to_pokemon,
+)
+from pokedex_data import (
+    ALL_POKEMON_SPECIES,
+    LEVEL_EVOLUTIONS,
+    LEVEL_EVO_PARENTS,
+    resolve_wild_form_for_level,
 )
 
 CATCH_CHANNEL_NAME = "🎮𝑪𝑨𝑻𝑪𝑯"
@@ -61,65 +79,8 @@ RARITY_CONFIG = {
 }
 
 POKEMON_POOL: List[PokemonSpecies] = [
-    # Comunes (80% captura)
-    PokemonSpecies(25, "Pikachu", "Común", "Eléctrico ⚡"),
-    PokemonSpecies(133, "Eevee", "Común", "Normal ⭐"),
-    PokemonSpecies(4, "Charmander", "Común", "Fuego 🔥"),
-    PokemonSpecies(1, "Bulbasaur", "Común", "Planta 🌿"),
-    PokemonSpecies(7, "Squirtle", "Común", "Agua 💧"),
-    PokemonSpecies(39, "Jigglypuff", "Común", "Hada 🌸"),
-    PokemonSpecies(52, "Meowth", "Común", "Normal ⭐"),
-    PokemonSpecies(54, "Psyduck", "Común", "Agua 💧"),
-    PokemonSpecies(58, "Growlithe", "Común", "Fuego 🔥"),
-    PokemonSpecies(92, "Gastly", "Común", "Fantasma 👻"),
-    PokemonSpecies(129, "Magikarp", "Común", "Agua 💧"),
-    PokemonSpecies(143, "Snorlax", "Común", "Normal ⭐"),
-    PokemonSpecies(252, "Treecko", "Común", "Planta 🌿"),
-    PokemonSpecies(255, "Torchic", "Común", "Fuego 🔥"),
-    PokemonSpecies(258, "Mudkip", "Común", "Agua 💧"),
-    PokemonSpecies(393, "Piplup", "Común", "Agua 💧"),
-    PokemonSpecies(447, "Riolu", "Común", "Lucha 🥊"),
-    PokemonSpecies(570, "Zorua", "Común", "Siniestro 🌑"),
-    # Raros (55% captura)
-    PokemonSpecies(6, "Charizard", "Raro", "Fuego / Volador 🔥"),
-    PokemonSpecies(9, "Blastoise", "Raro", "Agua 💧"),
-    PokemonSpecies(3, "Venusaur", "Raro", "Planta / Veneno 🌿"),
-    PokemonSpecies(94, "Gengar", "Raro", "Fantasma / Veneno 👻"),
-    PokemonSpecies(59, "Arcanine", "Raro", "Fuego 🔥"),
-    PokemonSpecies(130, "Gyarados", "Raro", "Agua / Volador 💧"),
-    PokemonSpecies(131, "Lapras", "Raro", "Agua / Hielo ❄️"),
-    PokemonSpecies(197, "Umbreon", "Raro", "Siniestro 🌑"),
-    PokemonSpecies(196, "Espeon", "Raro", "Psíquico 🔮"),
-    PokemonSpecies(212, "Scizor", "Raro", "Bicho / Acero ⚙️"),
-    PokemonSpecies(282, "Gardevoir", "Raro", "Psíquico / Hada 🌸"),
-    PokemonSpecies(359, "Absol", "Raro", "Siniestro 🌑"),
-    PokemonSpecies(448, "Lucario", "Raro", "Lucha / Acero 🥊"),
-    PokemonSpecies(468, "Togekiss", "Raro", "Hada / Volador 🌸"),
-    # Épicos (35% captura)
-    PokemonSpecies(149, "Dragonite", "Épico", "Dragón / Volador 🐉"),
-    PokemonSpecies(248, "Tyranitar", "Épico", "Roca / Siniestro 🪨"),
-    PokemonSpecies(373, "Salamence", "Épico", "Dragón / Volador 🐉"),
-    PokemonSpecies(376, "Metagross", "Épico", "Acero / Psíquico ⚙️"),
-    PokemonSpecies(445, "Garchomp", "Épico", "Dragón / Tierra 🐉"),
-    PokemonSpecies(635, "Hydreigon", "Épico", "Siniestro / Dragón 🐉"),
-    PokemonSpecies(637, "Volcarona", "Épico", "Bicho / Fuego 🔥"),
-    PokemonSpecies(658, "Greninja", "Épico", "Agua / Siniestro 💧"),
-    PokemonSpecies(778, "Mimikyu", "Épico", "Fantasma / Hada 👻"),
-    PokemonSpecies(887, "Dragapult", "Épico", "Dragón / Fantasma 🐉"),
-    # Legendarios / Míticos (18% captura)
-    PokemonSpecies(150, "Mewtwo", "Legendario", "Psíquico 🔮"),
-    PokemonSpecies(151, "Mew", "Legendario", "Psíquico 🔮"),
-    PokemonSpecies(249, "Lugia", "Legendario", "Psíquico / Volador 🔮"),
-    PokemonSpecies(250, "Ho-Oh", "Legendario", "Fuego / Volador 🔥"),
-    PokemonSpecies(384, "Rayquaza", "Legendario", "Dragón / Volador 🐉"),
-    PokemonSpecies(382, "Kyogre", "Legendario", "Agua 💧"),
-    PokemonSpecies(383, "Groudon", "Legendario", "Tierra 🌋"),
-    PokemonSpecies(483, "Dialga", "Legendario", "Acero / Dragón ⏳"),
-    PokemonSpecies(484, "Palkia", "Legendario", "Agua / Dragón 🌌"),
-    PokemonSpecies(487, "Giratina", "Legendario", "Fantasma / Dragón 👻"),
-    PokemonSpecies(491, "Darkrai", "Legendario", "Siniestro 🌑"),
-    PokemonSpecies(493, "Arceus", "Legendario", "Normal ✨"),
-    PokemonSpecies(494, "Victini", "Legendario", "Psíquico / Fuego 🔥✌️"),
+    PokemonSpecies(pid, name, rarity, ptype)
+    for pid, name, rarity, ptype in ALL_POKEMON_SPECIES
 ]
 
 RARITY_POWER = {
@@ -129,34 +90,8 @@ RARITY_POWER = {
     "Legendario": 11,
 }
 
-# Tabla de evoluciones por nivel: pokedex_id -> siguiente evolución
-EVOLUTION_TABLE = {
-    1: {"min_level": 16, "to_id": 2, "to_name": "Ivysaur", "to_type": "Planta / Veneno 🌿", "to_rarity": "Raro"},
-    2: {"min_level": 32, "to_id": 3, "to_name": "Venusaur", "to_type": "Planta / Veneno 🌿", "to_rarity": "Raro"},
-    4: {"min_level": 16, "to_id": 5, "to_name": "Charmeleon", "to_type": "Fuego 🔥", "to_rarity": "Raro"},
-    5: {"min_level": 36, "to_id": 6, "to_name": "Charizard", "to_type": "Fuego / Volador 🔥", "to_rarity": "Raro"},
-    7: {"min_level": 16, "to_id": 8, "to_name": "Wartortle", "to_type": "Agua 💧", "to_rarity": "Raro"},
-    8: {"min_level": 36, "to_id": 9, "to_name": "Blastoise", "to_type": "Agua 💧", "to_rarity": "Raro"},
-    25: {"min_level": 22, "to_id": 26, "to_name": "Raichu", "to_type": "Eléctrico ⚡", "to_rarity": "Raro"},
-    39: {"min_level": 20, "to_id": 40, "to_name": "Wigglytuff", "to_type": "Normal / Hada 🌸", "to_rarity": "Raro"},
-    52: {"min_level": 24, "to_id": 53, "to_name": "Persian", "to_type": "Normal ⭐", "to_rarity": "Raro"},
-    54: {"min_level": 26, "to_id": 55, "to_name": "Golduck", "to_type": "Agua 💧", "to_rarity": "Raro"},
-    58: {"min_level": 24, "to_id": 59, "to_name": "Arcanine", "to_type": "Fuego 🔥", "to_rarity": "Raro"},
-    92: {"min_level": 18, "to_id": 93, "to_name": "Haunter", "to_type": "Fantasma / Veneno 👻", "to_rarity": "Raro"},
-    93: {"min_level": 32, "to_id": 94, "to_name": "Gengar", "to_type": "Fantasma / Veneno 👻", "to_rarity": "Raro"},
-    129: {"min_level": 20, "to_id": 130, "to_name": "Gyarados", "to_type": "Agua / Volador 💧", "to_rarity": "Raro"},
-    133: {"min_level": 20, "to_id": 197, "to_name": "Umbreon", "to_type": "Siniestro 🌑", "to_rarity": "Raro"},
-    252: {"min_level": 16, "to_id": 253, "to_name": "Grovyle", "to_type": "Planta 🌿", "to_rarity": "Raro"},
-    253: {"min_level": 36, "to_id": 254, "to_name": "Sceptile", "to_type": "Planta 🌿", "to_rarity": "Épico"},
-    255: {"min_level": 16, "to_id": 256, "to_name": "Combusken", "to_type": "Fuego / Lucha 🔥", "to_rarity": "Raro"},
-    256: {"min_level": 36, "to_id": 257, "to_name": "Blaziken", "to_type": "Fuego / Lucha 🔥", "to_rarity": "Épico"},
-    258: {"min_level": 16, "to_id": 259, "to_name": "Marshtomp", "to_type": "Agua / Tierra 💧", "to_rarity": "Raro"},
-    259: {"min_level": 36, "to_id": 260, "to_name": "Swampert", "to_type": "Agua / Tierra 💧", "to_rarity": "Épico"},
-    393: {"min_level": 16, "to_id": 394, "to_name": "Prinplup", "to_type": "Agua 💧", "to_rarity": "Raro"},
-    394: {"min_level": 36, "to_id": 395, "to_name": "Empoleon", "to_type": "Agua / Acero 💧", "to_rarity": "Épico"},
-    447: {"min_level": 22, "to_id": 448, "to_name": "Lucario", "to_type": "Lucha / Acero 🥊", "to_rarity": "Raro"},
-    570: {"min_level": 25, "to_id": 571, "to_name": "Zoroark", "to_type": "Siniestro 🌑", "to_rarity": "Épico"},
-}
+# Tabla oficial de evoluciones por nivel (sin evoluciones puras de objeto/intercambio; Eevee con 8 ramas)
+EVOLUTION_TABLE = LEVEL_EVOLUTIONS
 
 
 def get_artwork_url(pokedex_id: int, is_shiny: bool = False) -> str:
@@ -165,12 +100,24 @@ def get_artwork_url(pokedex_id: int, is_shiny: bool = False) -> str:
     return f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/{pokedex_id}.png"
 
 
-def roll_wild_pokemon() -> tuple[PokemonSpecies, bool]:
-    """Elige un Pokémon aleatorio ponderado por rareza y con 1% de probabilidad Shiny."""
+def roll_wild_pokemon(team: Optional[List[dict]] = None) -> tuple[PokemonSpecies, bool, int]:
+    """
+    Elige un Pokémon al azar entre las 1025 especies ponderado por rareza,
+    promedia el nivel salvaje con los niveles de tu equipo, ajusta la forma evolutiva
+    a ese nivel y aplica 1% de probabilidad Shiny.
+    """
+    if team:
+        avg_lvl = sum(int(m.get("poke_level", 1)) for m in team) / len(team)
+        wild_level = max(1, min(100, int(round(avg_lvl)) + random.randint(-3, 3)))
+    else:
+        wild_level = random.randint(1, 5)
+
     weights = [RARITY_CONFIG[p.rarity]["weight"] for p in POKEMON_POOL]
-    species = random.choices(POKEMON_POOL, weights=weights, k=1)[0]
+    picked = random.choices(POKEMON_POOL, weights=weights, k=1)[0]
+    adj_id, adj_name, adj_rarity, adj_ptype = resolve_wild_form_for_level(picked.pokedex_id, wild_level)
+    species = PokemonSpecies(adj_id, adj_name, adj_rarity, adj_ptype)
     is_shiny = random.random() < 0.01
-    return species, is_shiny
+    return species, is_shiny, wild_level
 
 
 _KNOWN_TYPES = (
@@ -201,9 +148,6 @@ TYPE_CHART: dict[str, dict[str, float]] = {
     "Hada": {"Fuego": 0.5, "Lucha": 2.0, "Veneno": 0.5, "Dragón": 2.0, "Siniestro": 2.0, "Acero": 0.5},
 }
 
-_EVOLVED_FROM = {v["to_id"]: k for k, v in EVOLUTION_TABLE.items()}
-
-
 def _parse_types(ptype_str: str) -> List[str]:
     found = [t for t in _KNOWN_TYPES if t.lower() in (ptype_str or "").lower()]
     return found or ["Normal"]
@@ -226,9 +170,9 @@ def get_type_multiplier(attacker_ptype: str, defender_ptype: str) -> float:
 
 def get_evolution_stage(pokedex_id: int, rarity: str) -> int:
     """Determina la fase evolutiva (1, 2 o 3) para escalar stats de combate."""
-    if pokedex_id in _EVOLVED_FROM:
-        prev_id = _EVOLVED_FROM[pokedex_id]
-        if prev_id in _EVOLVED_FROM:
+    if pokedex_id in LEVEL_EVO_PARENTS or pokedex_id in (134, 135, 136, 196, 197, 470, 471, 700):
+        prev = LEVEL_EVO_PARENTS.get(pokedex_id)
+        if prev and prev[0] in LEVEL_EVO_PARENTS:
             return 3
         if pokedex_id in EVOLUTION_TABLE:
             return 2
@@ -330,7 +274,7 @@ def simulate_pokemon_battle(fighter: dict, opponent: dict) -> dict:
             f_hp = max(0, f_hp - _hit(o_stats["atk"], o_stats["def"], o_mult))
             if f_hp <= 0:
                 break
-            o_hp = max(0, o_hp - _hit(f_stats["atk"], f_stats["def"], f_mult))
+            o_hp = max(0, o_hp - _hit(f_stats["atk"], o_stats["def"], f_mult))
 
     won = o_hp == 0 or (f_hp > o_hp)
 
@@ -548,6 +492,7 @@ def build_team_card_png(
     img.save(out, format="PNG")
     return out.getvalue()
 
+
 def build_welcome_card_png(
     username: str,
     member_count: int,
@@ -738,11 +683,62 @@ class PostCaptureDecisionView(discord.ui.View):
         self.wild_level = max(1, int(wild_level))
 
         if len(team) >= 6:
-            self.keep_btn.label = "🔄 Quedármelo (elegir a cuál liberar)"
+            self.keep_btn.label = "🔄 Reemplazar en equipo"
             self.keep_btn.style = discord.ButtonStyle.primary
+            srv_lvl, _, _ = get_user_stats(guild.id, author_id)
+            total_mons = get_total_pokemon_count(guild.id, author_id)
+            if srv_lvl >= 30 and total_mons < 36:
+                pc_btn = discord.ui.Button(
+                    label=f"💻 Guardar en PC de Bill ({total_mons}/36)",
+                    style=discord.ButtonStyle.success,
+                )
+                pc_btn.callback = self._send_to_pc_cb
+                self.add_item(pc_btn)
         else:
             self.keep_btn.label = f"✅ Añadir al equipo ({len(team) + 1}/6)"
             self.keep_btn.style = discord.ButtonStyle.success
+
+    async def _send_to_pc_cb(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "🔥 ¡Ey! Este Pokémon lo capturó otro entrenador.", ephemeral=True
+            )
+            return
+
+        ok = add_pokemon_to_pc(
+            guild_id=self.guild.id,
+            user_id=self.author_id,
+            pokedex_id=self.species.pokedex_id,
+            name=self.species.name,
+            rarity=self.species.rarity,
+            ptype=self.species.ptype,
+            is_shiny=self.is_shiny,
+            caught_at=time.time(),
+            poke_level=self.wild_level,
+        )
+        for item in self.children:
+            item.disabled = True
+
+        if not ok:
+            await interaction.response.edit_message(
+                content="⚠️ Tu PC de Bill alcanzó el máximo de **36 Pokémon** en total. Liberá alguno con `/pc`.",
+                view=self,
+            )
+            return
+
+        total_mons = get_total_pokemon_count(self.guild.id, self.author_id)
+        shiny_tag = "✨ " if self.is_shiny else ""
+        embed = discord.Embed(
+            title="💻 ¡Guardado en la PC de Bill! 🔥",
+            description=(
+                f"**{shiny_tag}{self.species.name}** (**Nv. {self.wild_level}** | `{self.species.rarity}`) fue transferido a tu **PC de Bill** "
+                f"(`{total_mons}/36` Pokémon totales).\n*Usá `/pc` cuando quieras administrarlos.*"
+            ),
+            color=RARITY_CONFIG[self.species.rarity]["color"],
+        )
+        embed.set_thumbnail(url=get_artwork_url(self.species.pokedex_id, self.is_shiny))
+        await interaction.response.edit_message(embed=embed, view=self)
+        asyncio.create_task(self.on_backup(self.guild, True))
 
     @discord.ui.button(label="✅ Añadir al equipo", style=discord.ButtonStyle.success)
     async def keep_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1103,6 +1099,7 @@ class ChooseFighterView(discord.ui.View):
                 xp_gain=xp_gain,
                 evolution_table=EVOLUTION_TABLE,
             )
+
             shiny_f = "✨ " if mon.get("is_shiny") else ""
             shiny_w = "✨ " if self.is_shiny else ""
 
@@ -1687,6 +1684,7 @@ class TrainerBattleView(discord.ui.View):
 
         return callback
 
+
 class PvPSelectFighterView(discord.ui.View):
     """Permite a ambos entrenadores elegir en secreto su Pokémon para el duelo 1 vs 1."""
 
@@ -1933,6 +1931,366 @@ class PvPChallengeView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=embed, view=self)
 
 
+class RareCandyChooseEvoView(discord.ui.View):
+    """Permite elegir la evolución deseada (ej. Eevee -> 8 Eeveelutions) al usar Rare Candy."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        author_id: int,
+        row_id: int,
+        mon_name: str,
+        is_shiny: bool,
+        new_level: int,
+        new_srv_lvl: int,
+        choices: List[dict],
+        on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+    ):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.author_id = author_id
+        self.row_id = row_id
+        self.mon_name = mon_name
+        self.is_shiny = is_shiny
+        self.new_level = new_level
+        self.new_srv_lvl = new_srv_lvl
+        self.on_backup = on_backup
+
+        for idx, opt in enumerate(choices[:10]):
+            btn = discord.ui.Button(
+                label=f"✨ {opt['to_name']}",
+                style=discord.ButtonStyle.primary,
+                row=idx // 4,
+            )
+            btn.callback = self._make_evo_cb(opt)
+            self.add_item(btn)
+
+    def _make_evo_cb(self, opt: dict):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message("🔥 ¡Este Rare Candy es de otro entrenador!", ephemeral=True)
+                return
+
+            res = apply_rare_candy_to_pokemon(
+                row_id=self.row_id,
+                guild_id=self.guild.id,
+                user_id=self.author_id,
+                levels=0,
+                evolution_table=EVOLUTION_TABLE,
+                chosen_evo_id=opt["to_id"],
+            )
+            for item in self.children:
+                item.disabled = True
+
+            shiny_f = "✨ " if self.is_shiny else ""
+            evo_name = res["name"] if res else opt["to_name"]
+            evo_id = res["pokedex_id"] if res else opt["to_id"]
+            embed = discord.Embed(
+                title=f"🍬✨ ¡EVOLUCIÓN CON RARE CANDY! 🔥",
+                description=(
+                    f"¡Tu **{shiny_f}{self.mon_name}** subió a **Nv. {self.new_level}** y elegiste evolucionarlo en "
+                    f"**{shiny_f}{evo_name}**! 🎉\n"
+                    f"🏅 **+1 Nivel de servidor** *(Ahora sos **Nivel {self.new_srv_lvl}** en SNAP!)*"
+                ),
+                color=discord.Color.gold(),
+            )
+            embed.set_image(url=get_artwork_url(evo_id, self.is_shiny))
+            await interaction.response.edit_message(embed=embed, view=self)
+            asyncio.create_task(self.on_backup(self.guild, True))
+
+        return callback
+
+
+class RareCandyUseView(discord.ui.View):
+    """Permite elegir un Pokémon del equipo para usar 1 Rare Candy (+10 niveles + 1 nivel de servidor)."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        author_id: int,
+        team: List[dict],
+        on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+        on_level_up: Optional[Callable[[discord.Guild, discord.Member, int], Awaitable[None]]] = None,
+    ):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.author_id = author_id
+        self.team = team
+        self.on_backup = on_backup
+        self.on_level_up = on_level_up
+
+        for idx, mon in enumerate(team[:6], start=1):
+            shiny_tag = "✨ " if mon.get("is_shiny") else ""
+            btn = discord.ui.Button(
+                label=f"{idx}. {shiny_tag}{mon['name']} (Nv. {mon.get('poke_level', 1)})",
+                style=discord.ButtonStyle.success,
+                row=(idx - 1) // 3,
+            )
+            btn.callback = self._make_use_cb(mon)
+            self.add_item(btn)
+
+    def _make_use_cb(self, mon: dict):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message("🔥 ¡Este Rare Candy es de otro entrenador!", ephemeral=True)
+                return
+
+            ok, remaining = consume_rare_candy(self.guild.id, self.author_id)
+            if not ok:
+                for item in self.children:
+                    item.disabled = True
+                await interaction.response.edit_message(
+                    content="❌ Ya no te quedan **Rare Candies** disponibles.", embed=None, view=self
+                )
+                return
+
+            res = apply_rare_candy_to_pokemon(
+                row_id=mon["id"],
+                guild_id=self.guild.id,
+                user_id=self.author_id,
+                levels=10,
+                evolution_table=EVOLUTION_TABLE,
+            )
+            _, new_srv_lvl = grant_server_levels(
+                self.guild.id, self.author_id, levels=1, username=interaction.user.display_name
+            )
+            if self.on_level_up and isinstance(interaction.user, discord.Member):
+                await self.on_level_up(self.guild, interaction.user, new_srv_lvl)
+
+            shiny_f = "✨ " if mon.get("is_shiny") else ""
+            if res and res.get("pending_choices"):
+                evo_view = RareCandyChooseEvoView(
+                    guild=self.guild,
+                    author_id=self.author_id,
+                    row_id=mon["id"],
+                    mon_name=mon["name"],
+                    is_shiny=bool(mon.get("is_shiny")),
+                    new_level=res["new_level"],
+                    new_srv_lvl=new_srv_lvl,
+                    choices=res["pending_choices"],
+                    on_backup=self.on_backup,
+                )
+                embed = discord.Embed(
+                    title=f"🍬✨ ¡{shiny_f}{mon['name']} está por evolucionar! 🔥",
+                    description=(
+                        f"¡Subió **+10 niveles** (ahora es **Nv. {res['new_level']}**) y subiste **+1 nivel de servidor** (**Nv. {new_srv_lvl}**)! 🎉\n\n"
+                        f"*Como usaste un **Rare Candy**, ¡podés elegir a qué evolución transformar a **{shiny_f}{mon['name']}**!*"
+                    ),
+                    color=discord.Color.gold(),
+                )
+                embed.set_thumbnail(url=get_artwork_url(mon["pokedex_id"], bool(mon.get("is_shiny"))))
+                await interaction.response.edit_message(embed=embed, view=evo_view)
+                asyncio.create_task(self.on_backup(self.guild, True))
+                return
+
+            for item in self.children:
+                item.disabled = True
+
+            new_name = res["name"] if res else mon["name"]
+            new_lvl = res["new_level"] if res else int(mon.get("poke_level", 1)) + 10
+            art_id = res["pokedex_id"] if res else mon["pokedex_id"]
+            evo_note = (
+                f"\n✨ **¡EVOLUCIÓN!** *{shiny_f}{res['old_name']}* evolucionó en **{shiny_f}{new_name}**! 🎉"
+                if (res and res["evolved"])
+                else ""
+            )
+
+            embed = discord.Embed(
+                title=f"🍬 ¡Rare Candy usado en {shiny_f}{new_name}! 🔥",
+                description=(
+                    f"**{shiny_f}{mon['name']}** subió **+10 niveles** → **Nv. {new_lvl}**!{evo_note}\n"
+                    f"🏅 **+1 Nivel de servidor** *(Ahora sos **Nivel {new_srv_lvl}** en SNAP!)*\n"
+                    f"🍬 **Rare Candies restantes:** {remaining}"
+                ),
+                color=discord.Color.gold() if (res and res["evolved"]) else discord.Color.green(),
+            )
+            embed.set_image(url=get_artwork_url(art_id, bool(mon.get("is_shiny"))))
+            await interaction.response.edit_message(embed=embed, view=self)
+            asyncio.create_task(self.on_backup(self.guild, True))
+
+        return callback
+
+
+class RareCandyGiftView(discord.ui.View):
+    """Botón del regalo diario de Rare Candy en 🎮𝑪𝑨𝑻𝑪𝑯."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        author_id: int,
+        on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+        on_level_up: Optional[Callable[[discord.Guild, discord.Member, int], Awaitable[None]]] = None,
+    ):
+        super().__init__(timeout=86400)
+        self.guild = guild
+        self.author_id = author_id
+        self.on_backup = on_backup
+        self.on_level_up = on_level_up
+
+    @discord.ui.button(label="🍬 ¡Usar Rare Candy ahora!", style=discord.ButtonStyle.danger)
+    async def open_candy_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "🔥 ¡Este Rare Candy diario fue regalado a otro entrenador! Usá `/rarecandy` si tenés alguno guardado.",
+                ephemeral=True,
+            )
+            return
+
+        candies = get_rare_candies(self.guild.id, self.author_id)
+        if candies <= 0:
+            await interaction.response.send_message("❌ Ya usaste tus **Rare Candies**.", ephemeral=True)
+            return
+
+        team = get_pokemon_team(self.guild.id, self.author_id)
+        if not team:
+            await interaction.response.send_message(
+                "❌ Todavía no tenés ningún Pokémon en tu equipo. ¡Tu Rare Candy quedó guardado para cuando atrapes uno con `/catch` y uses `/rarecandy`!",
+                ephemeral=True,
+            )
+            return
+
+        use_view = RareCandyUseView(
+            guild=self.guild,
+            author_id=self.author_id,
+            team=team,
+            on_backup=self.on_backup,
+            on_level_up=self.on_level_up,
+        )
+        embed = discord.Embed(
+            title="🍬 ¡Elegí un Pokémon para darle tu Rare Candy! 🔥",
+            description=(
+                f"Tenés **{candies}** Rare Candy disponible.\n"
+                f"✨ **Efecto:** **+10 Niveles** al Pokémon elegido *(¡y si evoluciona como Eevee podés elegir!)* + **+1 Nivel de servidor**."
+            ),
+            color=discord.Color.gold(),
+        )
+        await interaction.response.send_message(embed=embed, view=use_view, ephemeral=True)
+
+
+def _build_pc_embed(guild_id: int, user_id: int, display_name: str, note: str = "") -> tuple[discord.Embed, List[dict], List[dict]]:
+    team = get_pokemon_team(guild_id, user_id)
+    pc = get_pc_pokemon(guild_id, user_id)
+    total = len(team) + len(pc)
+
+    team_lines = [
+        f"`{i}.` {'✨ ' if m['is_shiny'] else ''}**{m['name']}** (*Nv. {m['poke_level']}* • {m['rarity']})"
+        for i, m in enumerate(team, start=1)
+    ] or ["*(Sin Pokémon activos)*"]
+
+    pc_lines = [
+        f"`{i}.` {'✨ ' if m['is_shiny'] else ''}**{m['name']}** (*Nv. {m['poke_level']}* • {m['rarity']})"
+        for i, m in enumerate(pc, start=1)
+    ] or ["*(Caja vacía)*"]
+
+    desc = (
+        f"📦 **Capacidad total:** **`{total}/36`** *(Equipo: `{len(team)}/6` | PC: `{len(pc)}/30`)*\n\n"
+        f"⚔️ **Equipo Activo:**\n" + "\n".join(team_lines) + "\n\n"
+        f"💻 **PC de Bill:**\n" + "\n".join(pc_lines[:20])
+    )
+    if len(pc_lines) > 20:
+        desc += f"\n*...y {len(pc_lines) - 20} más en la caja.*"
+    if note:
+        desc += f"\n\n{note}"
+
+    embed = discord.Embed(
+        title=f"💻 PC de Bill — {display_name} 🔥",
+        description=desc[:4000],
+        color=discord.Color.blue(),
+    )
+    embed.set_footer(text="Administrá tu equipo (6) y tus cajas (30) • Victini Bot 🔥✌️")
+    return embed, team, pc
+
+
+class BillsPCView(discord.ui.View):
+    """Interfaz interactiva para administrar hasta 36 Pokémon entre Equipo (6) y PC de Bill (30)."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        author_id: int,
+        author_name: str,
+        team: List[dict],
+        pc: List[dict],
+        on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+    ):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.author_id = author_id
+        self.author_name = author_name
+        self.on_backup = on_backup
+        self._build_controls(team, pc)
+
+    def _build_controls(self, team: List[dict], pc: List[dict]) -> None:
+        self.clear_items()
+        if len(team) > 1 and len(pc) < 30:
+            opts_to_pc = [
+                discord.SelectOption(
+                    label=f"{'✨ ' if m['is_shiny'] else ''}{m['name']} (Nv. {m['poke_level']})"[:100],
+                    description=f"{m['rarity']} • {m['ptype']}"[:100],
+                    value=str(m["id"]),
+                )
+                for m in team[:6]
+            ]
+            sel1 = discord.ui.Select(placeholder="📥 Mover del Equipo -> PC de Bill...", options=opts_to_pc, row=0)
+            sel1.callback = self._move_to_pc_cb
+            self.add_item(sel1)
+
+        if len(pc) > 0 and len(team) < 6:
+            opts_to_team = [
+                discord.SelectOption(
+                    label=f"{'✨ ' if m['is_shiny'] else ''}{m['name']} (Nv. {m['poke_level']})"[:100],
+                    description=f"{m['rarity']} • {m['ptype']}"[:100],
+                    value=str(m["id"]),
+                )
+                for m in pc[:25]
+            ]
+            sel2 = discord.ui.Select(placeholder="📤 Mover de la PC -> Equipo Activo...", options=opts_to_team, row=1)
+            sel2.callback = self._move_to_team_cb
+            self.add_item(sel2)
+
+        if len(pc) > 0:
+            opts_rel = [
+                discord.SelectOption(
+                    label=f"Liberar: {'✨ ' if m['is_shiny'] else ''}{m['name']} (Nv. {m['poke_level']})"[:100],
+                    value=str(m["id"]),
+                )
+                for m in pc[:25]
+            ]
+            sel3 = discord.ui.Select(placeholder="🕊️ Liberar un Pokémon de la PC...", options=opts_rel, row=2)
+            sel3.callback = self._release_pc_cb
+            self.add_item(sel3)
+
+    async def _refresh(self, interaction: discord.Interaction, note: str):
+        embed, team, pc = _build_pc_embed(self.guild.id, self.author_id, self.author_name, note=note)
+        self._build_controls(team, pc)
+        await interaction.response.edit_message(embed=embed, view=self)
+        asyncio.create_task(self.on_backup(self.guild, True))
+
+    async def _move_to_pc_cb(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("🔥 ¡Esta PC de Bill es de otro entrenador!", ephemeral=True)
+            return
+        row_id = int(interaction.data["values"][0])
+        ok, msg = move_pokemon_to_pc(row_id, self.guild.id, self.author_id)
+        await self._refresh(interaction, f"{'✅' if ok else '⚠️'} *{msg}*")
+
+    async def _move_to_team_cb(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("🔥 ¡Esta PC de Bill es de otro entrenador!", ephemeral=True)
+            return
+        row_id = int(interaction.data["values"][0])
+        ok, msg = move_pokemon_to_team(row_id, self.guild.id, self.author_id)
+        await self._refresh(interaction, f"{'✅' if ok else '⚠️'} *{msg}*")
+
+    async def _release_pc_cb(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("🔥 ¡Esta PC de Bill es de otro entrenador!", ephemeral=True)
+            return
+        row_id = int(interaction.data["values"][0])
+        ok = release_pokemon_by_id(row_id, self.guild.id, self.author_id)
+        await self._refresh(interaction, "✅ *Pokémon liberado de la PC.*" if ok else "⚠️ *No se pudo liberar.*")
+
+
 def setup_pokemon_commands(
     bot: commands.Bot,
     on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
@@ -2147,9 +2505,8 @@ def setup_pokemon_commands(
             )
             return
 
-        species, is_shiny = roll_wild_pokemon()
         user_team = get_pokemon_team(interaction.guild.id, interaction.user.id)
-        wild_level = roll_wild_level(user_team, species.rarity)
+        species, is_shiny, wild_level = roll_wild_pokemon(user_team)
         cfg = RARITY_CONFIG[species.rarity]
         shiny_tag = "✨ SHINY " if is_shiny else ""
         pct = int(cfg["catch_rate"] * 100)
@@ -2234,6 +2591,74 @@ def setup_pokemon_commands(
             on_level_up=on_level_up,
         )
         await interaction.response.send_message(content=usuario.mention, embed=embed, view=challenge_view)
+
+    @bot.tree.command(
+        name="rarecandy",
+        description="Usá un Rare Candy para subir +10 niveles a un Pokémon y +1 nivel de servidor (Solo en 🎮𝑪𝑨𝑻𝑪𝑯)",
+    )
+    async def rarecandy_command(interaction: discord.Interaction):
+        team = await _require_catch_channel_and_team(interaction, "rarecandy")
+        if team is None:
+            return
+        candies = get_rare_candies(interaction.guild.id, interaction.user.id)
+        if candies <= 0:
+            await interaction.response.send_message(
+                "🍬 **No tenés Rare Candies disponibles.** *Victini regala 1 Rare Candy al azar por día en este canal.* 🔥",
+                ephemeral=True,
+            )
+            return
+        use_view = RareCandyUseView(
+            guild=interaction.guild,
+            author_id=interaction.user.id,
+            team=team,
+            on_backup=on_backup,
+            on_level_up=on_level_up,
+        )
+        embed = discord.Embed(
+            title=f"🍬 ¡Rare Candy de {interaction.user.display_name}! 🔥",
+            description=(
+                f"Tenés **{candies}** Rare Candy disponible.\n"
+                f"✨ Elegí qué Pokémon del equipo sube **+10 niveles** *(¡y en Eevee podés elegir evolución!)* + **+1 nivel de servidor**."
+            ),
+            color=discord.Color.gold(),
+        )
+        await interaction.response.send_message(embed=embed, view=use_view, ephemeral=True)
+
+    @bot.tree.command(
+        name="pc",
+        description="Abrí la PC de Bill para administrar hasta 36 Pokémon (Requiere Nivel 30 • Solo en 🎮𝑪𝑨𝑻𝑪𝑯)",
+    )
+    async def pc_command(interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("Este comando solo funciona en **SNAP!** 🔥", ephemeral=True)
+            return
+        if not is_catch_channel(interaction.channel):
+            catch_ch = find_channel_fn(interaction.guild, CATCH_CHANNEL_NAME)
+            ch_mention = catch_ch.mention if catch_ch else f"**{CATCH_CHANNEL_NAME}**"
+            await interaction.response.send_message(
+                f"💻 ¡Ey! El comando `/pc` solo se puede usar en el canal {ch_mention} 👀🔥",
+                ephemeral=True,
+            )
+            return
+        srv_lvl, _, _ = get_user_stats(interaction.guild.id, interaction.user.id)
+        if srv_lvl < 30:
+            await interaction.response.send_message(
+                f"🔒 **Todavía no desbloqueaste la PC de Bill.**\n"
+                f"Se desbloquea al llegar al **Nivel 30** en el servidor *(actualmente sos **Nivel {srv_lvl}**)*. 💻🔥",
+                ephemeral=True,
+            )
+            return
+        await _grant_server_xp(interaction.guild, interaction.user, 8, on_level_up)
+        embed, team, pc = _build_pc_embed(interaction.guild.id, interaction.user.id, interaction.user.display_name)
+        view = BillsPCView(
+            guild=interaction.guild,
+            author_id=interaction.user.id,
+            author_name=interaction.user.display_name,
+            team=team,
+            pc=pc,
+            on_backup=on_backup,
+        )
+        await interaction.response.send_message(embed=embed, view=view)
 
     @bot.tree.command(
         name="team",
