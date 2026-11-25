@@ -439,7 +439,7 @@ class VictiniBot(commands.Bot):
     async def setup_hook(self):
         init_db()
         setup_music_commands(self)
-        setup_pokemon_commands(self, sync_levels_backup, find_target_channel)
+        setup_pokemon_commands(self, sync_levels_backup, find_target_channel, notify_level_up)
         print("🔥 Inicializando base de datos y árbol de comandos slash...", flush=True)
 
     async def on_ready(self):
