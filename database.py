@@ -585,8 +585,10 @@ def add_pokemon_to_team(
     ptype: str,
     is_shiny: bool,
     caught_at: float,
+    poke_level: int = 1,
 ) -> bool:
-    """Agrega un Pokémon al equipo si hay espacio (< 6)."""
+    """Agrega un Pokémon al equipo si hay espacio (< 6) conservando su nivel de captura."""
+    lvl = max(1, int(poke_level))
     with closing(_get_conn()) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -599,11 +601,11 @@ def add_pokemon_to_team(
         cursor.execute(
             _sql(
                 """
-                INSERT INTO user_pokemon (guild_id, user_id, pokedex_id, name, rarity, ptype, is_shiny, caught_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO user_pokemon (guild_id, user_id, pokedex_id, name, rarity, ptype, is_shiny, caught_at, poke_level, poke_xp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """
             ),
-            (guild_id, user_id, pokedex_id, name, rarity, ptype, 1 if is_shiny else 0, caught_at),
+            (guild_id, user_id, pokedex_id, name, rarity, ptype, 1 if is_shiny else 0, caught_at, lvl),
         )
         conn.commit()
         return True
@@ -619,8 +621,10 @@ def replace_pokemon_in_team(
     ptype: str,
     is_shiny: bool,
     caught_at: float,
+    poke_level: int = 1,
 ) -> bool:
-    """Libera el Pokémon indicado (`release_row_id`) y añade el nuevo al equipo."""
+    """Libera el Pokémon indicado (`release_row_id`) y añade el nuevo al equipo con su nivel de captura."""
+    lvl = max(1, int(poke_level))
     with closing(_get_conn()) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -632,11 +636,11 @@ def replace_pokemon_in_team(
         cursor.execute(
             _sql(
                 """
-                INSERT INTO user_pokemon (guild_id, user_id, pokedex_id, name, rarity, ptype, is_shiny, caught_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO user_pokemon (guild_id, user_id, pokedex_id, name, rarity, ptype, is_shiny, caught_at, poke_level, poke_xp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """
             ),
-            (guild_id, user_id, pokedex_id, name, rarity, ptype, 1 if is_shiny else 0, caught_at),
+            (guild_id, user_id, pokedex_id, name, rarity, ptype, 1 if is_shiny else 0, caught_at, lvl),
         )
         conn.commit()
         return True
