@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from typing import Optional, List, Callable, Awaitable
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from PIL import Image, ImageDraw, ImageFont
 
 from database import (
+    add_xp,
     get_pokeballs,
     consume_pokeball,
     add_pokeballs,
@@ -328,7 +330,7 @@ def simulate_pokemon_battle(fighter: dict, opponent: dict) -> dict:
             f_hp = max(0, f_hp - _hit(o_stats["atk"], o_stats["def"], o_mult))
             if f_hp <= 0:
                 break
-            o_hp = max(0, o_hp - _hit(f_stats["atk"], o_stats["def"], f_mult))
+            o_hp = max(0, o_hp - _hit(f_stats["atk"], f_stats["def"], f_mult))
 
     won = o_hp == 0 or (f_hp > o_hp)
 
@@ -545,7 +547,6 @@ def build_team_card_png(
     out = io.BytesIO()
     img.save(out, format="PNG")
     return out.getvalue()
-
 
 def build_welcome_card_png(
     username: str,
@@ -828,6 +829,30 @@ class PostCaptureDecisionView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
+async def _grant_server_xp(
+    guild: discord.Guild,
+    member: discord.abc.User,
+    amount: int,
+    on_level_up: Optional[Callable[[discord.Guild, discord.Member, int], Awaitable[None]]],
+) -> str:
+    """Otorga XP del servidor (SNAP! Level) sin cooldown de chat y notifica si sube de nivel."""
+    if amount <= 0:
+        return ""
+    leveled_up, new_level, _, _ = add_xp(
+        guild_id=guild.id,
+        user_id=member.id,
+        amount=amount,
+        now_ts=time.time(),
+        username=member.display_name,
+        cooldown=0,
+        update_timestamp=False,
+    )
+    if leveled_up and on_level_up and isinstance(member, discord.Member):
+        await on_level_up(guild, member, new_level)
+        return f"🏅 **+{amount} XP de servidor** *(¡Subiste a **Nivel {new_level}** en SNAP! 🌀)*"
+    return f"🏅 **+{amount} XP de servidor** *(SNAP! Level)*"
+
+
 class PostBattleCatchView(discord.ui.View):
     """Vista tras ganar una batalla: permite lanzar Pokéball con +20% de probabilidad o terminar."""
 
@@ -840,6 +865,7 @@ class PostBattleCatchView(discord.ui.View):
         pokeballs: int,
         on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
         wild_level: int = 1,
+        on_level_up: Optional[Callable[[discord.Guild, discord.Member, int], Awaitable[None]]] = None,
     ):
         super().__init__(timeout=120)
         self.guild = guild
@@ -848,6 +874,7 @@ class PostBattleCatchView(discord.ui.View):
         self.is_shiny = is_shiny
         self.on_backup = on_backup
         self.wild_level = max(1, int(wild_level))
+        self.on_level_up = on_level_up
 
         base_rate = RARITY_CONFIG[species.rarity]["catch_rate"]
         boosted_pct = int(min(0.98, base_rate + 0.20) * 100)
@@ -878,13 +905,15 @@ class PostBattleCatchView(discord.ui.View):
         shiny_tag = "✨ " if self.is_shiny else ""
 
         if not caught:
+            srv_note = await _grant_server_xp(self.guild, interaction.user, 8, self.on_level_up)
             for item in self.children:
                 item.disabled = True
             embed = discord.Embed(
                 title=f"💨 ¡Oh no! {shiny_tag}{self.species.name} se escapó...",
                 description=(
                     f"La Pokéball se movió 1... 2... ¡y se rompió a pesar de estar debilitado! 🔥\n"
-                    f"Te quedan **{remaining}** Pokéballs."
+                    f"Te quedan **{remaining}** Pokéballs.\n"
+                    f"{srv_note}"
                 ),
                 color=discord.Color.red(),
             )
@@ -894,6 +923,7 @@ class PostBattleCatchView(discord.ui.View):
             asyncio.create_task(self.on_backup(self.guild, True))
             return
 
+        srv_note = await _grant_server_xp(self.guild, interaction.user, 20, self.on_level_up)
         team = get_pokemon_team(self.guild.id, self.author_id)
         decision_view = PostCaptureDecisionView(
             guild=self.guild,
@@ -915,7 +945,8 @@ class PostBattleCatchView(discord.ui.View):
             title=f"🎉 ¡ATRAPASTE A {shiny_tag}{self.species.name.upper()} (Nv. {self.wild_level})! 🔥",
             description=(
                 f"{cfg['emoji']} **Rareza:** {self.species.rarity} | **Tipo:** {self.species.ptype}\n"
-                f"⭐ **Nivel capturado:** Nv. {self.wild_level} | 🎱 **Pokéballs restantes:** {remaining}"
+                f"⭐ **Nivel capturado:** Nv. {self.wild_level} | 🎱 **Pokéballs restantes:** {remaining}\n"
+                f"{srv_note}"
                 f"{extra_note}"
             ),
             color=cfg["color"],
@@ -999,6 +1030,7 @@ class ChooseFighterView(discord.ui.View):
         team: list[dict],
         on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
         wild_level: int = 1,
+        on_level_up: Optional[Callable[[discord.Guild, discord.Member, int], Awaitable[None]]] = None,
     ):
         super().__init__(timeout=120)
         self.guild = guild
@@ -1009,6 +1041,7 @@ class ChooseFighterView(discord.ui.View):
         self.team = team
         self.on_backup = on_backup
         self.wild_level = max(1, int(wild_level))
+        self.on_level_up = on_level_up
 
         for idx, mon in enumerate(team[:6], start=1):
             shiny_tag = "✨ " if mon.get("is_shiny") else ""
@@ -1070,7 +1103,6 @@ class ChooseFighterView(discord.ui.View):
                 xp_gain=xp_gain,
                 evolution_table=EVOLUTION_TABLE,
             )
-
             shiny_f = "✨ " if mon.get("is_shiny") else ""
             shiny_w = "✨ " if self.is_shiny else ""
 
@@ -1105,6 +1137,11 @@ class ChooseFighterView(discord.ui.View):
             progress_lines.extend(
                 _apply_exp_share(self.guild.id, self.author_id, self.team, mon["id"], xp_gain)
             )
+            srv_note = await _grant_server_xp(
+                self.guild, interaction.user, 20 if won else 10, self.on_level_up
+            )
+            if srv_note:
+                progress_lines.append(srv_note)
 
             asyncio.create_task(self.on_backup(self.guild, True))
 
@@ -1131,6 +1168,7 @@ class ChooseFighterView(discord.ui.View):
                     pokeballs=self.pokeballs,
                     on_backup=self.on_backup,
                     wild_level=self.wild_level,
+                    on_level_up=self.on_level_up,
                 )
                 await interaction.response.edit_message(embed=embed, view=next_view)
             else:
@@ -1181,6 +1219,7 @@ class ChooseFighterView(discord.ui.View):
             pokeballs=self.pokeballs,
             on_backup=self.on_backup,
             wild_level=self.wild_level,
+            on_level_up=self.on_level_up,
         )
         await interaction.response.edit_message(embed=embed, view=encounter_view)
 
@@ -1197,6 +1236,7 @@ class WildEncounterView(discord.ui.View):
         pokeballs: int,
         on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
         wild_level: int = 1,
+        on_level_up: Optional[Callable[[discord.Guild, discord.Member, int], Awaitable[None]]] = None,
     ):
         super().__init__(timeout=120)
         self.guild = guild
@@ -1206,6 +1246,7 @@ class WildEncounterView(discord.ui.View):
         self.pokeballs = pokeballs
         self.on_backup = on_backup
         self.wild_level = max(1, int(wild_level))
+        self.on_level_up = on_level_up
 
         self.throw_btn.label = f"🔴 ¡Lanzar Pokéball! (Tenés {pokeballs})"
 
@@ -1233,13 +1274,15 @@ class WildEncounterView(discord.ui.View):
         shiny_tag = "✨ " if self.is_shiny else ""
 
         if not caught:
+            srv_note = await _grant_server_xp(self.guild, interaction.user, 8, self.on_level_up)
             for item in self.children:
                 item.disabled = True
             embed = discord.Embed(
                 title=f"💨 ¡Oh no! {shiny_tag}{self.species.name} se escapó...",
                 description=(
                     f"La Pokéball se movió 1... 2... ¡y se rompió! 🔥\n"
-                    f"Te quedan **{remaining}** Pokéballs."
+                    f"Te quedan **{remaining}** Pokéballs.\n"
+                    f"{srv_note}"
                 ),
                 color=discord.Color.red(),
             )
@@ -1249,6 +1292,7 @@ class WildEncounterView(discord.ui.View):
             asyncio.create_task(self.on_backup(self.guild, True))
             return
 
+        srv_note = await _grant_server_xp(self.guild, interaction.user, 20, self.on_level_up)
         team = get_pokemon_team(self.guild.id, self.author_id)
         decision_view = PostCaptureDecisionView(
             guild=self.guild,
@@ -1270,7 +1314,8 @@ class WildEncounterView(discord.ui.View):
             title=f"🎉 ¡ATRAPASTE A {shiny_tag}{self.species.name.upper()} (Nv. {self.wild_level})! 🔥",
             description=(
                 f"{cfg['emoji']} **Rareza:** {self.species.rarity} | **Tipo:** {self.species.ptype}\n"
-                f"⭐ **Nivel capturado:** Nv. {self.wild_level} | 🎱 **Pokéballs restantes:** {remaining}"
+                f"⭐ **Nivel capturado:** Nv. {self.wild_level} | 🎱 **Pokéballs restantes:** {remaining}\n"
+                f"{srv_note}"
                 f"{extra_note}"
             ),
             color=cfg["color"],
@@ -1315,6 +1360,7 @@ class WildEncounterView(discord.ui.View):
             team=team,
             on_backup=self.on_backup,
             wild_level=self.wild_level,
+            on_level_up=self.on_level_up,
         )
         await interaction.response.edit_message(embed=embed, view=choose_view)
 
@@ -1433,6 +1479,7 @@ class TrainerBattleView(discord.ui.View):
         on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
         stage_index: int = 0,
         is_rematch: bool = False,
+        on_level_up: Optional[Callable[[discord.Guild, discord.Member, int], Awaitable[None]]] = None,
     ):
         super().__init__(timeout=120)
         self.guild = guild
@@ -1444,6 +1491,7 @@ class TrainerBattleView(discord.ui.View):
         self.on_backup = on_backup
         self.stage_index = stage_index
         self.is_rematch = is_rematch
+        self.on_level_up = on_level_up
 
         for idx, mon in enumerate(team[:6], start=1):
             shiny_tag = "✨ " if mon.get("is_shiny") else ""
@@ -1532,6 +1580,17 @@ class TrainerBattleView(discord.ui.View):
             reward_lines.extend(
                 _apply_exp_share(self.guild.id, self.author_id, self.team, mon["id"], xp_gain)
             )
+            srv_xp_table = {
+                "battle": (25, 12),
+                "gym": (35, 15),
+                "league": (50, 20),
+            }
+            win_srv, loss_srv = srv_xp_table.get(self.mode, (25, 12))
+            srv_note = await _grant_server_xp(
+                self.guild, interaction.user, win_srv if won else loss_srv, self.on_level_up
+            )
+            if srv_note:
+                reward_lines.append(srv_note)
 
             pokeballs_won = 0
             if won:
@@ -1628,13 +1687,259 @@ class TrainerBattleView(discord.ui.View):
 
         return callback
 
+class PvPSelectFighterView(discord.ui.View):
+    """Permite a ambos entrenadores elegir en secreto su Pokémon para el duelo 1 vs 1."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        challenger: discord.Member,
+        challenged: discord.Member,
+        team_a: list[dict],
+        team_b: list[dict],
+        on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+        on_level_up: Optional[Callable[[discord.Guild, discord.Member, int], Awaitable[None]]] = None,
+    ):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.challenger = challenger
+        self.challenged = challenged
+        self.team_a = team_a[:6]
+        self.team_b = team_b[:6]
+        self.on_backup = on_backup
+        self.on_level_up = on_level_up
+        self.pick_a: Optional[dict] = None
+        self.pick_b: Optional[dict] = None
+
+        options_a = [
+            discord.SelectOption(
+                label=f"{'✨ ' if m.get('is_shiny') else ''}{m['name']} (Nv. {m.get('poke_level', 1)})"[:100],
+                description=f"{m['rarity']} • {m['ptype']}"[:100],
+                value=str(idx),
+            )
+            for idx, m in enumerate(self.team_a)
+        ]
+        sel_a = discord.ui.Select(
+            placeholder=f"⚔️ {challenger.display_name[:28]}: Elegí tu Pokémon...",
+            options=options_a,
+            row=0,
+        )
+        sel_a.callback = self._on_pick_a
+        self.sel_a = sel_a
+        self.add_item(sel_a)
+
+        options_b = [
+            discord.SelectOption(
+                label=f"{'✨ ' if m.get('is_shiny') else ''}{m['name']} (Nv. {m.get('poke_level', 1)})"[:100],
+                description=f"{m['rarity']} • {m['ptype']}"[:100],
+                value=str(idx),
+            )
+            for idx, m in enumerate(self.team_b)
+        ]
+        sel_b = discord.ui.Select(
+            placeholder=f"🛡️ {challenged.display_name[:28]}: Elegí tu Pokémon...",
+            options=options_b,
+            row=1,
+        )
+        sel_b.callback = self._on_pick_b
+        self.sel_b = sel_b
+        self.add_item(sel_b)
+
+    async def _on_pick_a(self, interaction: discord.Interaction):
+        if interaction.user.id != self.challenger.id:
+            await interaction.response.send_message(
+                f"🔥 Este selector es para **{self.challenger.display_name}**.", ephemeral=True
+            )
+            return
+        self.pick_a = self.team_a[int(self.sel_a.values[0])]
+        self.sel_a.disabled = True
+        await self._advance_or_resolve(interaction)
+
+    async def _on_pick_b(self, interaction: discord.Interaction):
+        if interaction.user.id != self.challenged.id:
+            await interaction.response.send_message(
+                f"🔥 Este selector es para **{self.challenged.display_name}**.", ephemeral=True
+            )
+            return
+        self.pick_b = self.team_b[int(self.sel_b.values[0])]
+        self.sel_b.disabled = True
+        await self._advance_or_resolve(interaction)
+
+    async def _advance_or_resolve(self, interaction: discord.Interaction):
+        if self.pick_a is None or self.pick_b is None:
+            st_a = "✅ *Listo (secreto)*" if self.pick_a else "⏳ *Eligiendo...*"
+            st_b = "✅ *Listo (secreto)*" if self.pick_b else "⏳ *Eligiendo...*"
+            embed = discord.Embed(
+                title=f"⚔️ ¡DUELO 1v1: {self.challenger.display_name} vs {self.challenged.display_name}! 🔥",
+                description=(
+                    f"Cada entrenador debe elegir en secreto su Pokémon en los menús de abajo:\n\n"
+                    f"• **{self.challenger.display_name}:** {st_a}\n"
+                    f"• **{self.challenged.display_name}:** {st_b}"
+                ),
+                color=discord.Color.orange(),
+            )
+            embed.set_footer(text="Victini Bot • Duelo PvP 1 vs 1 🔥✌️")
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
+        for item in self.children:
+            item.disabled = True
+
+        mon_a = self.pick_a
+        mon_b = self.pick_b
+        lvl_a = int(mon_a.get("poke_level", 1))
+        lvl_b = int(mon_b.get("poke_level", 1))
+
+        battle = simulate_pokemon_battle(
+            fighter={
+                "pokedex_id": mon_a["pokedex_id"],
+                "name": mon_a["name"],
+                "rarity": mon_a["rarity"],
+                "ptype": mon_a["ptype"],
+                "level": lvl_a,
+                "is_shiny": bool(mon_a.get("is_shiny")),
+            },
+            opponent={
+                "pokedex_id": mon_b["pokedex_id"],
+                "name": mon_b["name"],
+                "rarity": mon_b["rarity"],
+                "ptype": mon_b["ptype"],
+                "level": lvl_b,
+                "is_shiny": bool(mon_b.get("is_shiny")),
+            },
+        )
+
+        a_won = battle["won"]
+        winner = self.challenger if a_won else self.challenged
+        loser = self.challenged if a_won else self.challenger
+        w_mon = mon_a if a_won else mon_b
+        l_mon = mon_b if a_won else mon_a
+        w_team = self.team_a if a_won else self.team_b
+        l_team = self.team_b if a_won else self.team_a
+
+        w_xp = max(45, 55 + int(l_mon.get("poke_level", 1)) * 4)
+        l_xp = max(20, w_xp // 2)
+
+        w_res = add_pokemon_xp(w_mon["id"], self.guild.id, winner.id, w_xp, EVOLUTION_TABLE)
+        l_res = add_pokemon_xp(l_mon["id"], self.guild.id, loser.id, l_xp, EVOLUTION_TABLE)
+
+        w_share = _apply_exp_share(self.guild.id, winner.id, w_team, w_mon["id"], w_xp)
+        l_share = _apply_exp_share(self.guild.id, loser.id, l_team, l_mon["id"], l_xp)
+
+        w_srv = await _grant_server_xp(self.guild, winner, 30, self.on_level_up)
+        l_srv = await _grant_server_xp(self.guild, loser, 15, self.on_level_up)
+
+        w_shiny = "✨ " if w_mon.get("is_shiny") else ""
+        l_shiny = "✨ " if l_mon.get("is_shiny") else ""
+        w_name = w_res["name"] if w_res else w_mon["name"]
+        l_name = l_res["name"] if l_res else l_mon["name"]
+        w_lvl = w_res["new_level"] if w_res else int(w_mon.get("poke_level", 1))
+        l_lvl = l_res["new_level"] if l_res else int(l_mon.get("poke_level", 1))
+
+        extra_lines = []
+        if w_res and w_res["evolved"]:
+            extra_lines.append(f"✨ **¡EVOLUCIÓN!** *{w_res['old_name']}* de {winner.display_name} evolucionó en **{w_name}**! 🎉")
+        if l_res and l_res["evolved"]:
+            extra_lines.append(f"✨ **¡EVOLUCIÓN!** *{l_res['old_name']}* de {loser.display_name} evolucionó en **{l_name}**! 🎉")
+        extra_lines.extend(w_share)
+        extra_lines.extend(l_share)
+
+        embed = discord.Embed(
+            title=f"🏆 ¡{winner.display_name.upper()} GANÓ EL DUELO 1v1! 🔥",
+            description=(
+                f"**{self.challenger.display_name}** sacó a **{'✨ ' if mon_a.get('is_shiny') else ''}{mon_a['name']}** (*Nv. {lvl_a}*) "
+                f"vs **{self.challenged.display_name}** con **{'✨ ' if mon_b.get('is_shiny') else ''}{mon_b['name']}** (*Nv. {lvl_b}*).\n\n"
+                + battle["summary"]
+                + "\n\n"
+                + f"🥇 **{winner.display_name}:** **{w_shiny}{w_name}** (*Nv. {w_lvl}*) ganó **+{w_xp} XP** | {w_srv}\n"
+                + f"🥈 **{loser.display_name}:** **{l_shiny}{l_name}** (*Nv. {l_lvl}*) ganó **+{l_xp} XP** | {l_srv}"
+                + ("\n\n" + "\n".join(extra_lines) if extra_lines else "")
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.set_image(url=get_artwork_url(w_res["pokedex_id"] if w_res else w_mon["pokedex_id"], bool(w_mon.get("is_shiny"))))
+        embed.set_thumbnail(url=get_artwork_url(l_res["pokedex_id"] if l_res else l_mon["pokedex_id"], bool(l_mon.get("is_shiny"))))
+        embed.set_footer(text="Victini Bot • Duelo PvP 1 vs 1 🔥✌️")
+        await interaction.response.edit_message(embed=embed, view=self)
+        asyncio.create_task(self.on_backup(self.guild, True))
+
+
+class PvPChallengeView(discord.ui.View):
+    """Botones de Aceptar o Rechazar para el usuario desafiado en /desafiar."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        challenger: discord.Member,
+        challenged: discord.Member,
+        team_a: list[dict],
+        team_b: list[dict],
+        on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
+        on_level_up: Optional[Callable[[discord.Guild, discord.Member, int], Awaitable[None]]] = None,
+    ):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.challenger = challenger
+        self.challenged = challenged
+        self.team_a = team_a
+        self.team_b = team_b
+        self.on_backup = on_backup
+        self.on_level_up = on_level_up
+
+    @discord.ui.button(label="✅ ¡Aceptar Desafío!", style=discord.ButtonStyle.success)
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.challenged.id:
+            await interaction.response.send_message(
+                f"🔥 ¡Solo {self.challenged.mention} puede aceptar este desafío!", ephemeral=True
+            )
+            return
+
+        select_view = PvPSelectFighterView(
+            guild=self.guild,
+            challenger=self.challenger,
+            challenged=self.challenged,
+            team_a=self.team_a,
+            team_b=self.team_b,
+            on_backup=self.on_backup,
+            on_level_up=self.on_level_up,
+        )
+        embed = discord.Embed(
+            title=f"⚔️ ¡DUELO ACEPTADO: {self.challenger.display_name} vs {self.challenged.display_name}! 🔥",
+            description=(
+                f"Cada entrenador debe elegir en secreto su Pokémon en los menús de abajo:\n\n"
+                f"• **{self.challenger.display_name}:** ⏳ *Eligiendo...*\n"
+                f"• **{self.challenged.display_name}:** ⏳ *Eligiendo...*"
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text="Victini Bot • Duelo PvP 1 vs 1 🔥✌️")
+        await interaction.response.edit_message(content=None, embed=embed, view=select_view)
+
+    @discord.ui.button(label="❌ Rechazar", style=discord.ButtonStyle.danger)
+    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.challenged.id:
+            await interaction.response.send_message(
+                f"🔥 ¡Solo {self.challenged.mention} puede rechazar este desafío!", ephemeral=True
+            )
+            return
+
+        for item in self.children:
+            item.disabled = True
+        embed = discord.Embed(
+            title="🏃 ¡Desafío rechazado!",
+            description=f"**{self.challenged.display_name}** prefirió no combatir contra **{self.challenger.display_name}** por ahora.",
+            color=discord.Color.light_grey(),
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=self)
+
 
 def setup_pokemon_commands(
     bot: commands.Bot,
     on_backup: Callable[[discord.Guild, bool], Awaitable[None]],
     find_channel_fn: Callable[[discord.Guild, str], Optional[discord.TextChannel]],
+    on_level_up: Optional[Callable[[discord.Guild, discord.Member, int], Awaitable[None]]] = None,
 ) -> None:
-    """Registra /catch, /battle, /gymchallenge, /pokemonleague (exclusivos de 🎮𝑪𝑨𝑻𝑪𝑯), /team y /equipo."""
+    """Registra /catch, /battle, /gymchallenge, /pokemonleague, /desafiar (exclusivos de 🎮𝑪𝑨𝑻𝑪𝑯), /team y /equipo."""
 
     async def _require_catch_channel_and_team(interaction: discord.Interaction, cmd_name: str) -> Optional[list[dict]]:
         if interaction.guild is None:
@@ -1696,6 +2001,7 @@ def setup_pokemon_commands(
             opponent=trainer,
             team=team,
             on_backup=on_backup,
+            on_level_up=on_level_up,
         )
         await interaction.response.send_message(embed=embed, view=view)
 
@@ -1753,6 +2059,7 @@ def setup_pokemon_commands(
             on_backup=on_backup,
             stage_index=stage_idx,
             is_rematch=is_rematch,
+            on_level_up=on_level_up,
         )
         await interaction.response.send_message(embed=embed, view=view)
 
@@ -1804,6 +2111,7 @@ def setup_pokemon_commands(
             team=team,
             on_backup=on_backup,
             stage_index=stage_idx,
+            on_level_up=on_level_up,
         )
         await interaction.response.send_message(embed=embed, view=view)
 
@@ -1868,8 +2176,64 @@ def setup_pokemon_commands(
             pokeballs=pokeballs,
             on_backup=on_backup,
             wild_level=wild_level,
+            on_level_up=on_level_up,
         )
         await interaction.response.send_message(embed=embed, view=view)
+
+    @bot.tree.command(
+        name="desafiar",
+        description="Desafiá a otro entrenador del servidor a un duelo Pokémon 1 vs 1 (Solo en 🎮𝑪𝑨𝑻𝑪𝑯)",
+    )
+    @app_commands.describe(usuario="Entrenador al que querés desafiar a un duelo 1 vs 1")
+    async def desafiar_command(interaction: discord.Interaction, usuario: discord.Member):
+        team_a = await _require_catch_channel_and_team(interaction, "desafiar")
+        if team_a is None:
+            return
+
+        if usuario.bot:
+            await interaction.response.send_message(
+                "🤖 ¡No podés desafiar a un bot! Para pelear contra la máquina usá `/battle`.",
+                ephemeral=True,
+            )
+            return
+
+        if usuario.id == interaction.user.id:
+            await interaction.response.send_message(
+                "🔥 ¡No podés desafiarte a vos mismo! Arrobá a otro entrenador de **SNAP!**.",
+                ephemeral=True,
+            )
+            return
+
+        team_b = get_pokemon_team(interaction.guild.id, usuario.id)
+        if not team_b:
+            await interaction.response.send_message(
+                f"❌ **{usuario.display_name}** todavía no tiene ningún Pokémon en su equipo para pelear. ¡Decile que use `/catch`!",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"⚔️ ¡DESAFÍO POKÉMON 1 vs 1! 🔥",
+            description=(
+                f"{usuario.mention}, **{interaction.user.display_name}** te desafió a un combate Pokémon!\n\n"
+                f"🏆 **Premio al ganador:** **+XP Pokémon** + **+30 XP de servidor** *(SNAP! Level)*\n"
+                f"🥈 **Consuelo:** **+XP Pokémon** + **+15 XP de servidor**\n\n"
+                f"*¿Aceptás el duelo o te achicás?* 👀✌️"
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text="Tenés 3 minutos para responder • Victini Bot 🔥✌️")
+
+        challenge_view = PvPChallengeView(
+            guild=interaction.guild,
+            challenger=interaction.user,
+            challenged=usuario,
+            team_a=team_a,
+            team_b=team_b,
+            on_backup=on_backup,
+            on_level_up=on_level_up,
+        )
+        await interaction.response.send_message(content=usuario.mention, embed=embed, view=challenge_view)
 
     @bot.tree.command(
         name="team",
