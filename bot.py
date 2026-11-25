@@ -25,9 +25,17 @@ from database import (
     xp_for_next_level,
     export_guild_levels,
     import_guild_levels,
+    get_bot_state,
+    set_bot_state,
+    add_rare_candy,
 )
 from music import setup_music_commands
-from pokemon_game import setup_pokemon_commands, build_welcome_card_png
+from pokemon_game import (
+    setup_pokemon_commands,
+    build_welcome_card_png,
+    CATCH_CHANNEL_NAME,
+    RareCandyGiftView,
+)
 from promo_cards import build_entreturnos_card_png, build_snap_card_png
 from tcg_booster import BoosterPackView
 from youtube_notifier import check_entreturnos_updates
@@ -296,6 +304,15 @@ async def notify_level_up(guild: discord.Guild, member: discord.Member, new_leve
                 f"🎱 ¡Además recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** disponibles)*\n\n"
                 f"🎁 **¡Y podés abrir un *Booster Pack Misterioso* de 10 cartas reales de Pokémon TCG!** 🎴✨"
             )
+        elif new_level == 30:
+            level_up_msg = (
+                f"💻🔥 **¡HITO DESBLOQUEADO, {member.mention}!** 🔥💻\n"
+                f"¡Llegaste al **Nivel 30** en **SNAP!** y *Victini te conecta con Bill*: "
+                f"📦 **¡Desbloqueaste la *PC de Bill* para tener hasta 36 Pokémon en total!** *(6 en tu equipo activo + 30 guardados en tus cajas)*\n"
+                f"*Usá `/pc` en `CATCH` para mover, guardar o liberar tus Pokémon.* ⚡✌️\n"
+                f"🎱 ¡Además recibiste **+1 Pokéball**! *(Tenés **{pokeballs}** disponibles)*\n\n"
+                f"🎁 **¡Y podés abrir un *Booster Pack Misterioso* de 10 cartas reales de Pokémon TCG!** 🎴✨"
+            )
         else:
             level_up_msg = (
                 f"🎉 {member.mention} ha subido al **nivel {new_level}**, *¡felicitaciones!* 🔥 "
@@ -504,6 +521,10 @@ class VictiniBot(commands.Bot):
         # 7. Iniciar monitor de YouTube (@EntreTurnosLIVE: directos y nuevos videos cada 3 min)
         if not youtube_notifier_loop.is_running():
             youtube_notifier_loop.start()
+
+        # 8. Iniciar regalo diario de Rare Candy en 🎮𝑪𝑨𝑻𝑪𝑯
+        if not daily_rare_candy_loop.is_running():
+            daily_rare_candy_loop.start()
 
         await self.change_presence(
             activity=discord.Activity(
@@ -838,6 +859,66 @@ async def youtube_notifier_loop():
 
 @youtube_notifier_loop.before_loop
 async def before_youtube_notifier_loop():
+    await bot.wait_until_ready()
+
+
+# ==========================================
+# 2E. REGALO DIARIO DE RARE CANDY EN 🎮𝑪𝑨𝑻𝑪𝑯
+# ==========================================
+@tasks.loop(minutes=30)
+async def daily_rare_candy_loop():
+    today_str = datetime.now(ARG_TZ).strftime("%Y-%m-%d")
+    for guild in bot.guilds:
+        date_key = f"rare_candy_date_{guild.id}"
+        last_uid_key = f"rare_candy_last_uid_{guild.id}"
+        if get_bot_state(date_key) == today_str:
+            continue
+
+        catch_ch = find_target_channel(guild, CATCH_CHANNEL_NAME)
+        if catch_ch is None:
+            continue
+
+        eligible = [m for m in catch_ch.members if not m.bot]
+        if not eligible:
+            continue
+
+        last_uid_raw = get_bot_state(last_uid_key)
+        if last_uid_raw and len(eligible) > 1:
+            pool = [m for m in eligible if str(m.id) != last_uid_raw] or eligible
+        else:
+            pool = eligible
+
+        chosen = random.choice(pool)
+        set_bot_state(date_key, today_str)
+        set_bot_state(last_uid_key, str(chosen.id))
+        total_candies = add_rare_candy(guild.id, chosen.id, amount=1, username=chosen.display_name)
+
+        try:
+            embed = discord.Embed(
+                title="🍬✨ ¡CARAMELO RARO DIARIO DE VICTINI! 🔥",
+                description=(
+                    f"¡Felicitaciones {chosen.mention}! *Victini eligió tu suerte hoy en **`{catch_ch.name}`*** ✌️🎉\n\n"
+                    f"🎁 **Regalo:** **+1 Rare Candy** *(Tenés **{total_candies}** en tu mochila)*\n"
+                    f"⚡ **Efecto:** Subí **+10 niveles** a uno de tus Pokémon del equipo *(¡en Pokémon con ramas como Eevee podés elegir evolución!)* y sumá **+1 nivel de servidor**.\n\n"
+                    f"*Tocá el botón de abajo o usá `/rarecandy` cuando quieras.*"
+                ),
+                color=discord.Color.gold(),
+            )
+            embed.set_footer(text="Victini Bot • Rare Candy Diario 🔥✌️")
+            view = RareCandyGiftView(
+                guild=guild,
+                author_id=chosen.id,
+                on_backup=sync_levels_backup,
+                on_level_up=notify_level_up,
+            )
+            await catch_ch.send(content=chosen.mention, embed=embed, view=view)
+            print(f"🍬 Rare Candy diario entregado a {chosen.display_name} en {guild.name}.", flush=True)
+        except Exception as e:
+            print(f"⚠️ Error entregando Rare Candy diario en {guild.name}: {e}", flush=True)
+
+
+@daily_rare_candy_loop.before_loop
+async def before_daily_rare_candy_loop():
     await bot.wait_until_ready()
 
 
